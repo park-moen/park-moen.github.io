@@ -1,5 +1,5 @@
 ---
-import BaseLayout from './BaseLayout.astro';
+import BaseLayout from "./BaseLayout.astro";
 
 type Props = {
   title: string;
@@ -10,10 +10,10 @@ type Props = {
 };
 
 const { title, description, pubDate, updatedDate, tags } = Astro.props;
-const dateFormatter = new Intl.DateTimeFormat('ko-KR', {
-  year: 'numeric',
-  month: 'long',
-  day: 'numeric',
+const dateFormatter = new Intl.DateTimeFormat("ko-KR", {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
 });
 ---
 

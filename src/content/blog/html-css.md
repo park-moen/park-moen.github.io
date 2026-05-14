@@ -14,12 +14,12 @@ tags: ["HTML", "CSS", "TIL"]
 `position` 속성은 `static`, `absolute`, `relative`, `fixed`, `sticky` 5가지 값을 가질 수 있다.
 `position` 속성의 기본값은 `static`이다.
 
-| 값 | 의미 | 기본값 |
-| --- | --- | --- |
-| `static` | `top`, `bottom`, `right`, `left` 값을 가질 수 없는 normal flow이다. | `static` |
-| `absolute` | 부모의 `position` 값을 기준으로 콘텐츠가 위치하는 방식 | |
-| `relative` | 자신을 기준으로 좌표를 지정하는 방식 | |
-| `fixed` | 뷰포트를 기준으로 좌표를 가지며, 따로 스크롤이 되지 않고 뷰포트에 고정되는 방식 | |
+| 값         | 의미                                                                            | 기본값   |
+| ---------- | ------------------------------------------------------------------------------- | -------- |
+| `static`   | `top`, `bottom`, `right`, `left` 값을 가질 수 없는 normal flow이다.             | `static` |
+| `absolute` | 부모의 `position` 값을 기준으로 콘텐츠가 위치하는 방식                          |          |
+| `relative` | 자신을 기준으로 좌표를 지정하는 방식                                            |          |
+| `fixed`    | 뷰포트를 기준으로 좌표를 가지며, 따로 스크롤이 되지 않고 뷰포트에 고정되는 방식 |          |
 
 ```txt
 position: absolute

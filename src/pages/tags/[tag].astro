@@ -1,9 +1,9 @@
 ---
-import { getCollection } from 'astro:content';
-import BaseLayout from '../../layouts/BaseLayout.astro';
+import { getCollection } from "astro:content";
+import BaseLayout from "../../layouts/BaseLayout.astro";
 
 export async function getStaticPaths() {
-  const posts = (await getCollection('blog')).filter((post) => !post.data.draft);
+  const posts = (await getCollection("blog")).filter((post) => !post.data.draft);
   const tags = new Set(posts.flatMap((post) => post.data.tags.map((tag) => tag.toLowerCase())));
 
   return Array.from(tags).map((tag) => ({
@@ -19,10 +19,10 @@ export async function getStaticPaths() {
 
 const { tag, posts } = Astro.props;
 
-const dateFormatter = new Intl.DateTimeFormat('ko-KR', {
-  year: 'numeric',
-  month: 'short',
-  day: 'numeric',
+const dateFormatter = new Intl.DateTimeFormat("ko-KR", {
+  year: "numeric",
+  month: "short",
+  day: "numeric",
 });
 ---
 

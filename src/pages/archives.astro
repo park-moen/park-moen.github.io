@@ -1,15 +1,15 @@
 ---
-import { getCollection } from 'astro:content';
-import BaseLayout from '../layouts/BaseLayout.astro';
+import { getCollection } from "astro:content";
+import BaseLayout from "../layouts/BaseLayout.astro";
 
-const posts = (await getCollection('blog'))
+const posts = (await getCollection("blog"))
   .filter((post) => !post.data.draft)
   .sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf());
 
-const dateFormatter = new Intl.DateTimeFormat('ko-KR', {
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
+const dateFormatter = new Intl.DateTimeFormat("ko-KR", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
 });
 ---
 

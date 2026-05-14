@@ -1,6 +1,6 @@
-import { defineConfig } from 'astro/config';
+import { defineConfig } from "astro/config";
 
 export default defineConfig({
-  site: 'https://park-moen.github.io',
-  trailingSlash: 'always',
+  site: "https://park-moen.github.io",
+  trailingSlash: "always",
 });

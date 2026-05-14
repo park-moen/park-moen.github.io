@@ -1,15 +1,12 @@
 ---
-import '../styles/global.css';
+import "../styles/global.css";
 
 type Props = {
   title: string;
   description?: string;
 };
 
-const {
-  title,
-  description = 'All Dev stories found in here',
-} = Astro.props;
+const { title, description = "All Dev stories found in here" } = Astro.props;
 
 const siteTitle = "Park moen's blog";
 const pageTitle = title === siteTitle ? title : `${title} | ${siteTitle}`;
@@ -30,9 +27,9 @@ const pageTitle = title === siteTitle ? title : `${title} | ${siteTitle}`;
     <link rel="canonical" href={Astro.url.href} />
     <title>{pageTitle}</title>
     <script is:inline>
-      const storedTheme = localStorage.getItem('theme');
-      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-      const theme = storedTheme || (prefersDark ? 'dark' : 'light');
+      const storedTheme = localStorage.getItem("theme");
+      const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+      const theme = storedTheme || (prefersDark ? "dark" : "light");
       document.documentElement.dataset.theme = theme;
     </script>
   </head>
@@ -57,12 +54,12 @@ const pageTitle = title === siteTitle ? title : `${title} | ${siteTitle}`;
       <p>&copy; {new Date().getFullYear()} Park moen</p>
     </footer>
     <script is:inline>
-      const toggle = document.querySelector('[data-theme-toggle]');
-      toggle?.addEventListener('click', () => {
+      const toggle = document.querySelector("[data-theme-toggle]");
+      toggle?.addEventListener("click", () => {
         const current = document.documentElement.dataset.theme;
-        const next = current === 'dark' ? 'light' : 'dark';
+        const next = current === "dark" ? "light" : "dark";
         document.documentElement.dataset.theme = next;
-        localStorage.setItem('theme', next);
+        localStorage.setItem("theme", next);
       });
     </script>
   </body>

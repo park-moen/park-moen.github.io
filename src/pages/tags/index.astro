@@ -1,8 +1,8 @@
 ---
-import { getCollection } from 'astro:content';
-import BaseLayout from '../../layouts/BaseLayout.astro';
+import { getCollection } from "astro:content";
+import BaseLayout from "../../layouts/BaseLayout.astro";
 
-const posts = (await getCollection('blog')).filter((post) => !post.data.draft);
+const posts = (await getCollection("blog")).filter((post) => !post.data.draft);
 const tagCounts = posts.reduce<Map<string, number>>((counts, post) => {
   post.data.tags.forEach((tag) => {
     counts.set(tag, (counts.get(tag) ?? 0) + 1);
