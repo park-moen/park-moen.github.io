@@ -1,0 +1,35 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+
+const posts = (await getCollection('blog')).filter((post) => !post.data.draft);
+const tagCounts = posts.reduce<Map<string, number>>((counts, post) => {
+  post.data.tags.forEach((tag) => {
+    counts.set(tag, (counts.get(tag) ?? 0) + 1);
+  });
+
+  return counts;
+}, new Map());
+
+const tags = Array.from(tagCounts.entries()).sort(([a], [b]) => a.localeCompare(b));
+---
+
+<BaseLayout title="Tags" description="기술 블로그 태그 목록">
+  <section class="page-heading">
+    <h1>Tags</h1>
+    <p>관심 있는 주제별로 글을 찾아볼 수 있습니다.</p>
+  </section>
+
+  <ul class="tag-cloud" aria-label="태그 목록">
+    {
+      tags.map(([tag, count]) => (
+        <li>
+          <a href={`/tags/${tag.toLowerCase()}/`}>
+            {tag}
+            <span>{count}</span>
+          </a>
+        </li>
+      ))
+    }
+  </ul>
+</BaseLayout>

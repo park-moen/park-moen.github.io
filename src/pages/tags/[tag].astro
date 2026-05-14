@@ -1,0 +1,51 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+
+export async function getStaticPaths() {
+  const posts = (await getCollection('blog')).filter((post) => !post.data.draft);
+  const tags = new Set(posts.flatMap((post) => post.data.tags.map((tag) => tag.toLowerCase())));
+
+  return Array.from(tags).map((tag) => ({
+    params: { tag },
+    props: {
+      tag,
+      posts: posts
+        .filter((post) => post.data.tags.some((postTag) => postTag.toLowerCase() === tag))
+        .sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf()),
+    },
+  }));
+}
+
+const { tag, posts } = Astro.props;
+
+const dateFormatter = new Intl.DateTimeFormat('ko-KR', {
+  year: 'numeric',
+  month: 'short',
+  day: 'numeric',
+});
+---
+
+<BaseLayout title={`Tag: ${tag}`} description={`${tag} 태그가 달린 글 목록`}>
+  <section class="page-heading">
+    <a class="back-link" href="/tags/">← Tags</a>
+    <h1>#{tag}</h1>
+    <p>{posts.length}개의 글이 있습니다.</p>
+  </section>
+
+  <section class="post-list" aria-label={`${tag} 태그 글 목록`}>
+    {
+      posts.map((post) => (
+        <article class="post-card">
+          <div>
+            <h3>
+              <a href={`/${post.data.slug}/`}>{post.data.title}</a>
+            </h3>
+            <p>{post.data.description}</p>
+          </div>
+          <time datetime={post.data.pubDate.toISOString()}>{dateFormatter.format(post.data.pubDate)}</time>
+        </article>
+      ))
+    }
+  </section>
+</BaseLayout>

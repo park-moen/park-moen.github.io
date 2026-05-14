@@ -20,7 +20,7 @@ const dateFormatter = new Intl.DateTimeFormat('ko-KR', {
 <BaseLayout title={title} description={description}>
   <article class="post">
     <header class="post-header">
-      <p class="eyebrow">Technical Blog</p>
+      <a class="back-link" href="/">← Posts</a>
       <h1>{title}</h1>
       <p class="post-description">{description}</p>
       <div class="post-meta">
@@ -36,7 +36,11 @@ const dateFormatter = new Intl.DateTimeFormat('ko-KR', {
       {
         tags.length > 0 && (
           <ul class="tag-list" aria-label="태그">
-            {tags.map((tag) => <li>{tag}</li>)}
+            {tags.map((tag) => (
+              <li>
+                <a href={`/tags/${tag.toLowerCase()}/`}>{tag}</a>
+              </li>
+            ))}
           </ul>
         )
       }

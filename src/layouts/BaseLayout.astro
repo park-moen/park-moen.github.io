@@ -16,7 +16,7 @@ const pageTitle = title === siteTitle ? title : `${title} | ${siteTitle}`;
 ---
 
 <!doctype html>
-<html lang="ko">
+<html lang="ko" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -29,14 +29,26 @@ const pageTitle = title === siteTitle ? title : `${title} | ${siteTitle}`;
     <link rel="icon" type="image/png" sizes="16x16" href="/images/favicon-16x16-next.png" />
     <link rel="canonical" href={Astro.url.href} />
     <title>{pageTitle}</title>
+    <script is:inline>
+      const storedTheme = localStorage.getItem('theme');
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      const theme = storedTheme || (prefersDark ? 'dark' : 'light');
+      document.documentElement.dataset.theme = theme;
+    </script>
   </head>
   <body>
     <header class="site-header">
-      <a class="site-title" href="/" aria-label="홈으로 이동">{siteTitle}</a>
-      <nav class="site-nav" aria-label="주요 메뉴">
-        <a href="/">Home</a>
-        <a href="/archives/">Archives</a>
-      </nav>
+      <div class="site-header-inner">
+        <a class="site-title" href="/" aria-label="홈으로 이동">{siteTitle}</a>
+        <nav class="site-nav" aria-label="주요 메뉴">
+          <a href="/">Posts</a>
+          <a href="/tags/">Tags</a>
+          <a href="/archives/">Archive</a>
+        </nav>
+      </div>
+      <button class="theme-toggle" type="button" aria-label="테마 변경" data-theme-toggle>
+        <span aria-hidden="true">◐</span>
+      </button>
     </header>
     <main class="site-main">
       <slot />
@@ -44,5 +56,14 @@ const pageTitle = title === siteTitle ? title : `${title} | ${siteTitle}`;
     <footer class="site-footer">
       <p>&copy; {new Date().getFullYear()} Park moen</p>
     </footer>
+    <script is:inline>
+      const toggle = document.querySelector('[data-theme-toggle]');
+      toggle?.addEventListener('click', () => {
+        const current = document.documentElement.dataset.theme;
+        const next = current === 'dark' ? 'light' : 'dark';
+        document.documentElement.dataset.theme = next;
+        localStorage.setItem('theme', next);
+      });
+    </script>
   </body>
 </html>
