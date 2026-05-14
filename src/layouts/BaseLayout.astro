@@ -1,0 +1,48 @@
+---
+import '../styles/global.css';
+
+type Props = {
+  title: string;
+  description?: string;
+};
+
+const {
+  title,
+  description = 'All Dev stories found in here',
+} = Astro.props;
+
+const siteTitle = "Park moen's blog";
+const pageTitle = title === siteTitle ? title : `${title} | ${siteTitle}`;
+---
+
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta property="og:title" content={pageTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={Astro.url.href} />
+    <link rel="icon" type="image/png" sizes="32x32" href="/images/favicon-32x32-next.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/images/favicon-16x16-next.png" />
+    <link rel="canonical" href={Astro.url.href} />
+    <title>{pageTitle}</title>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="site-title" href="/" aria-label="홈으로 이동">{siteTitle}</a>
+      <nav class="site-nav" aria-label="주요 메뉴">
+        <a href="/">Home</a>
+        <a href="/archives/">Archives</a>
+      </nav>
+    </header>
+    <main class="site-main">
+      <slot />
+    </main>
+    <footer class="site-footer">
+      <p>&copy; {new Date().getFullYear()} Park moen</p>
+    </footer>
+  </body>
+</html>

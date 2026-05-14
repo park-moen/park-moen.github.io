@@ -1,0 +1,40 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../layouts/BaseLayout.astro';
+
+const posts = (await getCollection('blog'))
+  .filter((post) => !post.data.draft)
+  .sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf());
+
+const dateFormatter = new Intl.DateTimeFormat('ko-KR', {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+---
+
+<BaseLayout title="Park moen's blog">
+  <section class="hero">
+    <p class="eyebrow">Frontend Notes</p>
+    <h1>Park moen's blog</h1>
+    <p>프론트엔드 학습과 개발 기록을 정리하는 기술 블로그입니다.</p>
+  </section>
+
+  <section class="post-list" aria-labelledby="recent-posts">
+    <h2 id="recent-posts">최근 글</h2>
+    {
+      posts.map((post) => (
+        <article class="post-card">
+          <time datetime={post.data.pubDate.toISOString()}>{dateFormatter.format(post.data.pubDate)}</time>
+          <h3>
+            <a href={`/${post.data.slug}/`}>{post.data.title}</a>
+          </h3>
+          <p>{post.data.description}</p>
+          <ul class="tag-list" aria-label={`${post.data.title} 태그`}>
+            {post.data.tags.map((tag) => <li>{tag}</li>)}
+          </ul>
+        </article>
+      ))
+    }
+  </section>
+</BaseLayout>

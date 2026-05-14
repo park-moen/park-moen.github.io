@@ -1,0 +1,48 @@
+---
+import BaseLayout from './BaseLayout.astro';
+
+type Props = {
+  title: string;
+  description: string;
+  pubDate: Date;
+  updatedDate?: Date;
+  tags: string[];
+};
+
+const { title, description, pubDate, updatedDate, tags } = Astro.props;
+const dateFormatter = new Intl.DateTimeFormat('ko-KR', {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+---
+
+<BaseLayout title={title} description={description}>
+  <article class="post">
+    <header class="post-header">
+      <p class="eyebrow">Technical Blog</p>
+      <h1>{title}</h1>
+      <p class="post-description">{description}</p>
+      <div class="post-meta">
+        <time datetime={pubDate.toISOString()}>{dateFormatter.format(pubDate)}</time>
+        {
+          updatedDate && (
+            <span>
+              Updated <time datetime={updatedDate.toISOString()}>{dateFormatter.format(updatedDate)}</time>
+            </span>
+          )
+        }
+      </div>
+      {
+        tags.length > 0 && (
+          <ul class="tag-list" aria-label="태그">
+            {tags.map((tag) => <li>{tag}</li>)}
+          </ul>
+        )
+      }
+    </header>
+    <div class="prose">
+      <slot />
+    </div>
+  </article>
+</BaseLayout>
