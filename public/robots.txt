@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://park-moen.github.io/sitemap-index.xml

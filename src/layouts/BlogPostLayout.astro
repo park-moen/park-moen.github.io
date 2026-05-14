@@ -15,20 +15,60 @@ const dateFormatter = new Intl.DateTimeFormat("ko-KR", {
   month: "long",
   day: "numeric",
 });
+
+const siteUrl = "https://park-moen.github.io";
+const postUrl = new URL(Astro.url.pathname, siteUrl).href;
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  headline: title,
+  description,
+  datePublished: pubDate.toISOString(),
+  dateModified: (updatedDate ?? pubDate).toISOString(),
+  url: postUrl,
+  author: {
+    "@type": "Person",
+    name: "Park moen",
+    url: siteUrl,
+  },
+  publisher: {
+    "@type": "Person",
+    name: "Park moen",
+    url: siteUrl,
+  },
+  mainEntityOfPage: {
+    "@type": "WebPage",
+    "@id": postUrl,
+  },
+  keywords: tags,
+};
 ---
 
-<BaseLayout title={title} description={description}>
+<BaseLayout
+  title={title}
+  description={description}
+  type="article"
+  publishedTime={pubDate}
+  modifiedTime={updatedDate ?? pubDate}
+  tags={tags}
+  jsonLd={jsonLd}
+>
   <article class="post">
     <header class="post-header">
       <a class="back-link" href="/">← Posts</a>
       <h1>{title}</h1>
       <p class="post-description">{description}</p>
       <div class="post-meta">
-        <time datetime={pubDate.toISOString()}>{dateFormatter.format(pubDate)}</time>
+        <time datetime={pubDate.toISOString()}
+          >{dateFormatter.format(pubDate)}</time
+        >
         {
           updatedDate && (
             <span>
-              Updated <time datetime={updatedDate.toISOString()}>{dateFormatter.format(updatedDate)}</time>
+              Updated{" "}
+              <time datetime={updatedDate.toISOString()}>
+                {dateFormatter.format(updatedDate)}
+              </time>
             </span>
           )
         }
