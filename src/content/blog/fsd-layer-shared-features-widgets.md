@@ -1,8 +1,8 @@
 ---
 title: "FSD Layer 비교: Shared vs Features vs Widgets"
-description: "FSD(Feature-Sliced Design)의 Shared, Features, Widgets 레이어의 책임과 재사용 범위, 추상화 레벨을 예제와 함께 비교합니다."
-pubDate: 2025-10-20T00:00:00+09:00
-slug: "2026/03/17/fsd-layer-shared-features-widgets"
+description: "FSD(Feature-Sliced Design)의 Shared, Features, Widgets 레이어의 책임과 재사용 범위, 추상화 레벨을 예제와 함께 비교하고, 계층별 참조 가능 범위와 실무 판단 기준을 정리합니다."
+pubDate: 2025-05-18T00:00:00+09:00
+slug: "2025/05/18/fsd-layer-shared-features-widgets"
 tags: ["FSD", "Architecture"]
 ---
 
@@ -153,10 +153,91 @@ tags: ["FSD", "Architecture"]
 
 ---
 
-## 6. 결론
+## 6. 실무 판단 기준: 컴포넌트를 어느 레이어에 둘까?
 
-- **Shared** 는 **모양만** 관리하는 프리미티브 컴포넌트
-- **Features** 는 **작은 기능 단위**로 비즈니스 로직과 UI를 결합
-- **Widgets** 는 여러 기능을 묶어 **독립 로딩·에러 경계**를 제공하는 중간 단위 컴포넌트
+레이어 구분이 이론적으로는 명확해 보여도, 실제 컴포넌트를 배치할 때는 판단이 흔들리는 경우가 많습니다. 헤더(Header) 컴포넌트를 예시로 살펴봅니다.
+
+### 헤더는 Shared? Widgets?
+
+모든 페이지에서 공통으로 쓰이는 헤더를 `shared`에 두고 싶은 충동이 생깁니다. 하지만 **헤더가 어떤 상태나 기능을 포함하느냐**에 따라 위치가 달라집니다.
+
+| 헤더 내용                                     | 배치 레이어    |
+| --------------------------------------------- | -------------- |
+| 로고 + 정적 네비게이션 링크만 있는 경우       | `shared` 가능  |
+| 로그인 여부에 따라 UI가 달라지는 경우         | `widgets` 필요 |
+| 검색창, 알림, 사용자 메뉴 등 기능이 있는 경우 | `widgets` 필요 |
+
+`shared`는 **비즈니스 상태를 참조할 수 없습니다.** 따라서 로그인 상태(`entities/session`)나 검색 기능(`features/search`)이 필요한 헤더는 반드시 `widgets`에 두어야 합니다.
+
+```tsx
+// ❌ shared에서 상위 레이어 참조 - 규칙 위반
+// shared/ui/Header.tsx
+import { useSession } from "@features/auth"; // 금지!
+
+// ✅ widgets에서 하위 레이어 조합 - 허용
+// widgets/header/ui/Header.tsx
+import { Logo } from "@shared/ui/Logo";
+import { useSession } from "@entities/session";
+import { SearchBar } from "@features/search";
+
+export function Header() {
+  const { isLoggedIn } = useSession();
+  return (
+    <header>
+      <Logo />
+      <SearchBar />
+      {isLoggedIn && <UserMenu />}
+    </header>
+  );
+}
+```
+
+### features에서 shared 참조 가능 여부
+
+> "`features/user/ui/UpdateProfileForm.tsx`에서 `shared`의 `Button`을 써도 되나?"
+
+**네, 완전히 허용됩니다.** `features`는 `shared`보다 상위 레이어이므로, 하위인 `shared`를 참조하는 것은 FSD 의존성 규칙에 부합합니다.
+
+```tsx
+// ✅ features → shared 참조 (허용)
+import { Button } from "@shared/ui/Button";
+import { Input } from "@shared/ui/Input";
+
+const UpdateProfileForm = () => (
+  <form>
+    <Input name="username" />
+    <Button type="submit">저장</Button>
+  </form>
+);
+```
+
+---
+
+## 7. 계층별 참조 가능 범위 요약
+
+| 레이어     | 참조 가능                           | 참조 불가                                                 |
+| ---------- | ----------------------------------- | --------------------------------------------------------- |
+| `app`      | 모든 레이어                         | —                                                         |
+| `pages`    | widgets, features, entities, shared | app                                                       |
+| `widgets`  | features, entities, shared          | app, pages                                                |
+| `features` | entities, shared                    | app, pages, widgets, **다른 features 슬라이스**           |
+| `entities` | shared                              | app, pages, widgets, features, **다른 entities 슬라이스** |
+| `shared`   | —                                   | 모든 상위 레이어                                          |
+
+> **📌 참고**: `features/auth`에서 `features/cart`를 참조하는 것은 같은 레이어 내 다른 슬라이스 간 참조이므로 금지됩니다. 두 슬라이스가 공통으로 필요한 것은 `entities` 또는 `shared`로 내려야 합니다.
+
+---
+
+## 8. 결론
+
+- **Shared** 는 **모양만** 관리하는 프리미티브 컴포넌트. 비즈니스 상태 참조 절대 금지.
+- **Features** 는 **작은 기능 단위**로 비즈니스 로직과 UI를 결합. 다른 Feature 슬라이스 참조 금지.
+- **Widgets** 는 여러 기능을 묶어 **독립 로딩·에러 경계**를 제공하는 중간 단위 컴포넌트.
 
 이렇게 각 레이어의 **책임**과 **재사용 범위**, **추상화 레벨**을 명확히 분리하면, 코드베이스의 **유연성·확장성·유지보수성**을 동시에 높일 수 있습니다.
+
+---
+
+**참고 자료**
+
+- [FSD 공식 문서 - UI의 큰 재사용 블록](https://feature-sliced.design/kr/docs/get-started/tutorial#ui%EC%9D%98-%ED%81%B0-%EC%9E%AC%EC%82%AC%EC%9A%A9-%EB%B8%94%EB%A1%9D)
