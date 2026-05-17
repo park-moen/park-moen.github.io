@@ -4,6 +4,7 @@ description: "UNIBUSK 프로젝트에서 Vitest, Playwright, Storybook을 활용
 pubDate: 2026-05-12T00:00:00+09:00
 slug: "2026/05/12/testing-guide"
 tags: ["Testing", "Vitest", "Playwright", "Storybook"]
+draft: true
 ---
 
 ## 이 문서의 목적

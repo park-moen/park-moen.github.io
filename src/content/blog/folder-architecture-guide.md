@@ -4,6 +4,7 @@ description: "역할 기반(role-based) 폴더 구조의 한계를 분석하고,
 pubDate: 2026-05-08T00:00:00+09:00
 slug: "2026/05/08/folder-architecture-guide"
 tags: ["Architecture", "Next.js", "FSD", "Co-location", "DDD"]
+draft: true
 ---
 
 ## 이 문서의 목적
