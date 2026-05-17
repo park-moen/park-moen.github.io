@@ -1,0 +1,204 @@
+---
+title: "useMediaQuery: useEffect에서 useSyncExternalStore로"
+description: "useMediaQuery를 직접 구현하는 과정에서 ESLint 경고가 잘못된 패턴을 가리켜주었고, 그 끝에 useSyncExternalStore가 올바른 도구임을 알게 된 과정을 기록합니다."
+pubDate: 2026-05-17T00:00:00+09:00
+slug: "2026/05/17/use-sync-external-store-migration"
+tags: ["React", "Hooks", "useSyncExternalStore", "Performance", "SSR"]
+draft: true
+---
+
+import { Image } from "astro:assets";
+import eslintScreenshot from "./eslint-no-direct-set-state-warning.png";
+
+## 1단계: useEffect + useState로 첫 구현
+
+`useMediaQuery`를 외부 패키지 없이 직접 구현하기로 했습니다. SSR(Next.js) 환경을 고려하여 다음 세 가지를 설계에 반영했습니다.
+
+- **Lazy Initializer**: `useState`에 함수 참조를 전달해 마운트 시 1회만 초기값 연산
+- **`initializeWithValue` 옵션**: 클라이언트에서 즉시 실제 값을 읽을지 결정
+- **`useIsomorphicLayoutEffect`**: 서버에서 `useLayoutEffect` 경고를 방지하면서 클라이언트에서는 페인트 전에 실행
+
+```tsx
+import { useEffect, useLayoutEffect, useState } from "react";
+
+type UseMediaQueryOptions = {
+  initializeWithValue?: boolean;
+};
+
+const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
+
+export function useMediaQuery(query: string, { initializeWithValue = false }: UseMediaQueryOptions = {}): boolean {
+  const getInitialValue = () => {
+    if (initializeWithValue && typeof window !== "undefined") {
+      return window.matchMedia(query).matches;
+    }
+    return false;
+  };
+
+  const [matches, setMatches] = useState<boolean>(getInitialValue);
+
+  useIsomorphicLayoutEffect(() => {
+    const media = window.matchMedia(query);
+
+    setMatches(media.matches); // ← 여기서 문제가 발생합니다
+
+    const listener = (event: MediaQueryListEvent) => {
+      setMatches(event.matches);
+    };
+
+    media.addEventListener("change", listener);
+    return () => media.removeEventListener("change", listener);
+  }, [query]);
+
+  return matches;
+}
+```
+
+각각의 설계 결정이 나름의 이유를 가지고 있었지만, ESLint가 곧 문제를 짚어주었습니다.
+
+---
+
+## 2단계: ESLint 경고 발생
+
+<Image
+  src={eslintScreenshot}
+  alt="ESLint 경고: useEffect 내에서 setMatches를 직접 호출하는 코드에 no-direct-set-state-in-use-effect 경고가 표시된 VSCode 스크린샷"
+  width={720}
+/>
+
+`useIsomorphicLayoutEffect` 내부에서 `setMatches(media.matches)`를 직접 호출하는 부분이 문제였습니다.
+
+이 규칙이 경고하는 이유는 명확합니다. effect 내에서 `setState`를 직접 호출하면 **렌더 → 페인트 → setState → 추가 렌더**의 흐름이 발생합니다. 즉, 불필요한 렌더 사이클이 추가됩니다.
+
+---
+
+## 3단계: useLayoutEffect로 바꿔도 동일한 경고
+
+`useEffect`가 문제라면 `useLayoutEffect`로 바꾸면 되지 않을까 생각했습니다.
+
+```tsx
+// useIsomorphicLayoutEffect → 내부적으로 useLayoutEffect 사용
+useIsomorphicLayoutEffect(() => {
+  setMatches(media.matches); // 여전히 경고 발생
+}, [query]);
+```
+
+결과는 동일했습니다. 이 규칙은 **`useEffect`와 `useLayoutEffect` 모두**를 대상으로 하며, effect 내에서 setState를 직접 호출하는 패턴 전체를 금지합니다.
+
+이 시점에서 발상을 바꿔야 했습니다. 규칙이 effect를 고치라는 게 아니라, **effect 자체를 쓰지 말라**고 가리키고 있었습니다.
+
+---
+
+## 4단계: 규칙이 진짜 가리키는 방향 — useSyncExternalStore
+
+React 18부터 도입된 `useSyncExternalStore`는 "React 바깥의 외부 저장소"를 구독하기 위해 설계된 훅입니다.
+
+`MediaQueryList`는 React가 관리하지 않는 브라우저 API, 즉 정확히 "외부 저장소"입니다. ESLint가 경고한 패턴, 즉 effect 내 직접 setState를 근본적으로 해결할 도구가 바로 `useSyncExternalStore`입니다.
+
+```tsx
+useSyncExternalStore(
+  subscribe, // 구독 등록/해제 함수
+  getSnapshot, // 현재 값을 읽는 함수 (클라이언트)
+  getServerSnapshot, // 현재 값을 읽는 함수 (서버/SSR)
+);
+```
+
+인수의 역할을 `MediaQueryList`에 대입하면:
+
+| 인자                | 역할                      | MediaQueryList 적용                        |
+| ------------------- | ------------------------- | ------------------------------------------ |
+| `subscribe`         | change 이벤트 구독/해제   | `addEventListener` / `removeEventListener` |
+| `getSnapshot`       | 현재 matches 값 반환      | `window.matchMedia(query).matches`         |
+| `getServerSnapshot` | SSR 시 안전한 초기값 반환 | `() => false`                              |
+
+---
+
+## 5단계: 최종 코드
+
+```tsx
+import { useSyncExternalStore } from "react";
+
+export function useMediaQuery(query: string): boolean {
+  return useSyncExternalStore(
+    (callback) => {
+      const media = window.matchMedia(query);
+      media.addEventListener("change", callback);
+      return () => media.removeEventListener("change", callback);
+    },
+    () => window.matchMedia(query).matches,
+    () => false,
+  );
+}
+```
+
+코드가 절반 이하로 줄었습니다. 없어진 것들을 확인하면 왜 줄었는지 이해할 수 있습니다.
+
+| 제거된 것                            | 이유                                                 |
+| ------------------------------------ | ---------------------------------------------------- |
+| `useState`                           | React가 구독 상태를 직접 관리                        |
+| `useIsomorphicLayoutEffect`          | effect 자체가 불필요                                 |
+| `getInitialValue` (lazy initializer) | `getServerSnapshot`이 SSR 처리 담당                  |
+| `initializeWithValue` 옵션           | `getSnapshot` / `getServerSnapshot` 분리로 자동 해결 |
+
+---
+
+## 비교: 이전 vs 이후
+
+### 렌더 흐름
+
+**이전 (useEffect + setState)**
+
+```
+마운트 → 렌더 (matches = false)
+       → 페인트 ← 잘못된 UI가 순간 노출될 수 있음
+       → useLayoutEffect 실행 → setMatches → 리렌더
+       → 페인트 (올바른 UI)
+```
+
+**이후 (useSyncExternalStore)**
+
+```
+마운트 → getSnapshot 호출 → matches = 실제 값
+       → 렌더 (올바른 값으로 바로 시작)
+       → 페인트 ← 처음부터 올바른 UI
+```
+
+### SSR 처리
+
+**이전**: `typeof window !== 'undefined'` 조건을 `getInitialValue`와 `useIsomorphicLayoutEffect` 두 곳에서 처리
+
+**이후**: `getServerSnapshot`이 서버를 담당, `getSnapshot`이 클라이언트를 담당 — React가 자동으로 분기
+
+### 사용법
+
+```tsx
+// 이전: initializeWithValue 옵션 고려 필요
+const isMobile = useMediaQuery("(max-width: 768px)", { initializeWithValue: false });
+
+// 이후: 옵션 없이 단순하게
+const isMobile = useMediaQuery("(max-width: 768px)");
+```
+
+---
+
+## 정리
+
+이번 마이그레이션의 출발점은 직접 구현이었지만, ESLint 경고 하나가 올바른 방향을 알려주었습니다.
+
+- `useEffect` 내 직접 `setState` → **렌더 사이클 낭비**
+- `useLayoutEffect`로 교체 → **동일한 경고, 근본 해결 아님**
+- `useSyncExternalStore` 도입 → **구독 패턴의 올바른 추상화**
+
+`useSyncExternalStore`는 브라우저 API(MediaQueryList, localStorage, window 이벤트 등) 구독 패턴 전반에 적용할 수 있습니다. "React 바깥의 값을 구독해야 한다"는 상황이 오면 이 hook을 먼저 떠올리십시오.
+
+> **📌 참고** `useSyncExternalStore`는 React 18에서 도입되었습니다. 이 프로젝트는 React 19를 사용하므로 별도 polyfill 없이 사용 가능합니다.
+
+---
+
+**참고 자료**
+
+- [React 공식 문서 - useSyncExternalStore](https://react.dev/reference/react/useSyncExternalStore)
+- [React 공식 문서 - useEffect](https://react.dev/reference/react/useEffect)
+- [React 공식 문서 - useLayoutEffect](https://react.dev/reference/react/useLayoutEffect)
+- [MDN - MediaQueryList](https://developer.mozilla.org/en-US/docs/Web/API/MediaQueryList)
+- [eslint-react - no-direct-set-state-in-use-effect](https://eslint-react.xyz/docs/rules/hooks-extra-no-direct-set-state-in-use-effect)
