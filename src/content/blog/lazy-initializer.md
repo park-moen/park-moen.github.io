@@ -4,7 +4,7 @@ description: "useState에 초기값 대신 함수를 전달하는 Lazy Initializ
 pubDate: 2026-05-17T00:00:00+09:00
 slug: "2026/05/17/lazy-initializer"
 tags: ["React", "TypeScript", "Performance", "Hooks"]
-draft: true
+draft: false
 ---
 
 ## 배경: 왜 이 패턴이 필요한가

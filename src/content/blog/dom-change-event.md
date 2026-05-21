@@ -4,7 +4,7 @@ description: "'change'는 하나의 이벤트가 아닙니다. 어떤 객체에 
 pubDate: 2026-05-17T00:00:00+09:00
 slug: "2026/05/17/dom-change-event"
 tags: ["DOM", "TypeScript", "Browser API", "Event"]
-draft: true
+draft: false
 ---
 
 ## 배경: 오해가 생기는 이유

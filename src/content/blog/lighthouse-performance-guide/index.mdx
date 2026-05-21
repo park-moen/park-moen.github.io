@@ -1,0 +1,369 @@
+---
+title: "Lighthouse Performance 90점 도전기 — Next.js App Router 이미지 최적화 심층 분석"
+description: "UNIBUSK 홈페이지 Lighthouse 성능 점수를 88점까지 끌어올린 과정을 기록합니다. dev 서버 측정 함정, LCP 이미지 우선순위, Server Component 분리, fetchpriority 이슈까지 실전에서 마주친 문제들을 정리합니다."
+pubDate: 2026-05-18T00:00:00+09:00
+slug: "2026/05/18/lighthouse-performance-guide"
+tags: ["Next.js", "Performance", "Lighthouse", "Image Optimization", "React"]
+draft: false
+---
+
+import { Image } from "astro:assets";
+import lcpFetchpriorityWarning from "./lighthouse-lcp-fetchpriority-warning.png";
+
+## 1. Lighthouse 점수 구조 이해하기
+
+Lighthouse Performance 점수는 5개 메트릭의 **가중 평균**입니다.
+
+| 메트릭                             | 가중치  | 의미                                  |
+| ---------------------------------- | ------- | ------------------------------------- |
+| **LCP** (Largest Contentful Paint) | **25%** | 가장 큰 콘텐츠 요소가 렌더링되는 시간 |
+| **TBT** (Total Blocking Time)      | **30%** | 메인 스레드가 차단된 총 시간          |
+| **CLS** (Cumulative Layout Shift)  | **25%** | 레이아웃 이동 누적 점수               |
+| **FCP** (First Contentful Paint)   | **10%** | 첫 콘텐츠가 렌더링되는 시간           |
+| **SI** (Speed Index)               | **10%** | 시각적 콘텐츠가 채워지는 속도         |
+
+**핵심 통찰**: TBT(30%)와 LCP(25%)만 잡아도 전체 점수의 55%를 통제합니다. 반대로 FCP와 SI는 합쳐도 20%밖에 안 되므로, 거기에 에너지를 쏟는 건 비효율적입니다.
+
+---
+
+## 2. 함정 1: Dev 서버에서 측정하지 말 것
+
+처음 Lighthouse를 실행했을 때 **69점**이 나왔습니다. 원인을 분석해보니 dev 서버(`next dev`) 환경 자체의 문제였습니다.
+
+**dev 서버의 문제점:**
+
+- JavaScript와 CSS가 minification되지 않음 → 번들 크기 비대
+- TanStack Query Devtools 같은 개발 도구가 번들에 포함됨
+- HMR(Hot Module Replacement) 런타임 코드가 추가됨
+- Source map이 로드됨
+
+**올바른 측정 방법:**
+
+```bash
+# 1. Production 빌드
+pnpm build
+
+# 2. Production 서버 실행
+pnpm start
+
+# 3. http://localhost:3000 에서 Lighthouse 측정
+```
+
+같은 코드라도 dev에서 69점 → production에서 88점으로 **19점 차이**가 났습니다. **Lighthouse는 반드시 production 빌드에서 측정해야 의미 있는 수치를 얻을 수 있습니다.**
+
+---
+
+## 3. 함정 2: Chrome 확장 프로그램이 점수를 오염시킨다
+
+일반 Chrome 탭에서 Lighthouse를 실행하면 설치된 확장 프로그램이 페이지에 JavaScript를 주입합니다. 이 추가 스크립트가 TBT를 악화시키고, CLS를 유발할 수 있습니다.
+
+**해결책: 시크릿 모드에서 측정**
+
+```
+Chrome → 새 시크릿 창 (Cmd+Shift+N) → 측정 대상 URL → DevTools → Lighthouse
+```
+
+단, 시크릿 모드에서 확장 프로그램을 허용한 경우라면 동일한 문제가 발생합니다. 확장 프로그램을 아예 비활성화한 상태에서 측정하는 것이 가장 정확합니다.
+
+---
+
+## 4. LCP란 정확히 무엇인가
+
+LCP는 직관적이지 않은 부분이 있습니다. **"가장 중요한 이미지"가 아니라 "뷰포트에서 픽셀 면적이 가장 큰 요소"** 가 LCP입니다.
+
+UNIBUSK 홈의 경우:
+
+- `heroIllustSrc` 이미지(지도 일러스트): 시각적으로 메인 이미지처럼 보임
+- `mapBgSrc` 이미지(지도 배경): 뷰포트에서 차지하는 픽셀 면적이 더 큼
+
+결과적으로 Lighthouse는 `mapBgSrc`를 LCP 요소로 지정했습니다. 개발자의 의도와 다른 요소가 LCP가 될 수 있으므로, DevTools Network 탭에서 실제로 어떤 요소가 LCP로 판정됐는지 확인하는 것이 중요합니다.
+
+---
+
+## 5. 이미지 최적화 1: AVIF 포맷과 압축
+
+기존 이미지 포맷(PNG, WebP)에서 AVIF로 변환했습니다.
+
+**포맷별 압축률 비교:**
+
+| 포맷 | 상대적 파일 크기 |
+| ---- | ---------------- |
+| PNG  | 100% (기준)      |
+| WebP | ~30%             |
+| AVIF | ~15-20%          |
+
+실제 적용 결과:
+
+- `main-bg.webp` → `compressed-main-bg2.avif`: ~20KB
+- `main-image.webp` → `compressed-main-image.avif`: ~80KB
+
+LCP 이미지가 절반 이하로 줄어들면 네트워크 다운로드 시간이 단축되어 LCP가 직접 개선됩니다.
+
+**Next.js에서의 AVIF 지원**: Next.js Image 컴포넌트는 기본적으로 AVIF와 WebP를 지원합니다. `next.config.js`에서 별도 설정 없이도 브라우저가 AVIF를 지원하면 자동으로 AVIF를 서빙합니다.
+
+---
+
+## 6. 이미지 최적화 2: sizes prop과 responsive 힌트
+
+Next.js `<Image>` 컴포넌트에서 `fill` prop을 사용하면 브라우저는 이미지를 얼마나 크게 표시할지 알 수 없습니다. `sizes` prop이 없으면 Next.js는 `100vw`로 가정하고 불필요하게 큰 이미지를 요청합니다.
+
+**수정 전:**
+
+```tsx
+<Image src={mapBgSrc} alt="" fill priority />
+```
+
+**수정 후:**
+
+```tsx
+<Image src={mapBgSrc} alt="" fill priority sizes="(max-width: 1280px) 60vw, 800px" />
+```
+
+`sizes`를 명시하면 브라우저가 현재 뷰포트 크기에 맞는 최적 해상도의 이미지를 선택합니다. 불필요한 대역폭 낭비를 줄이고 LCP에 영향을 줍니다.
+
+---
+
+## 7. 이미지 최적화 3: priority prop과 fetchpriority
+
+브라우저는 HTML을 파싱하면서 발견한 리소스에 우선순위를 부여합니다. 기본적으로 이미지는 **Low** 또는 **Auto** 우선순위를 가집니다.
+
+LCP 이미지는 가능한 한 빨리 로드되어야 하므로, **High** 우선순위를 명시해야 합니다.
+
+```tsx
+<Image
+  src={mapBgSrc}
+  alt=""
+  fill
+  priority  {/* ← 이것이 fetchpriority="high" 를 설정 */}
+/>
+```
+
+`priority` prop은 내부적으로 다음 두 가지를 수행합니다:
+
+1. HTML `<img>` 태그에 `fetchpriority="high"` 속성 추가
+2. `<link rel="preload">` 태그를 `<head>`에 삽입하여 조기 발견 유도
+
+---
+
+## 8. Server Component 분리로 클라이언트 경계 최소화
+
+### 문제 상황
+
+`HomeHeroSection`이 `'use client'` 컴포넌트였습니다. 검색 폼의 인터랙션(useState, useRouter) 때문입니다.
+
+그런데 `'use client'` 컴포넌트 안에 있는 `priority` 이미지는 SSR 과정에서 `<link rel="preload">` 생성이 지연될 수 있습니다. 서버가 해당 컴포넌트를 클라이언트 번들로 처리하기 때문입니다.
+
+### Next.js App Router의 철학
+
+> "클라이언트 경계(client boundary)는 가능한 한 leaf node(말단 컴포넌트)에 배치하라"
+
+즉, 인터랙션이 필요한 최소 단위만 `'use client'`로 선언하고, 나머지는 Server Component로 유지해야 합니다.
+
+### 해결책: 컴포넌트 분리
+
+**분리 전:**
+
+```
+HomeHeroSection ('use client') ← 이미지 + 검색폼 전부
+```
+
+**분리 후:**
+
+```
+HomeHeroSection (Server Component) ← 이미지 + 레이아웃
+  └── HomeHeroSearch ('use client') ← 검색폼만
+```
+
+**`HomeHeroSection` (Server Component로 변경):**
+
+```tsx
+// 'use client' 제거
+import Image from "next/image";
+import { MainLayout } from "@/components/layout";
+import { HomeHeroSearch } from "./home-hero-search";
+
+export function HomeHeroSection({ mapBgSrc, heroIllustSrc }: HomeHeroSectionProps) {
+  return (
+    <section className="w-full bg-[#FFFDFB]">
+      <div className="relative mx-auto min-h-250 w-full max-w-480">
+        <MainLayout className="relative z-10 pt-20">
+          <div className="grid grid-cols-12 items-center gap-6">
+            <div className="col-span-5">
+              <h1>
+                누구나 거리 위에서
+                <br />
+                공연을 시작할 수 있도록
+              </h1>
+              <p>버스킹이 가능한 장소와 현장을 지도에서 바로 찾아보세요</p>
+              <HomeHeroSearch /> {/* 클라이언트 경계는 여기만 */}
+            </div>
+            <div className="relative col-span-7">
+              <Image src={mapBgSrc} fill priority sizes="..." />
+              <Image src={heroIllustSrc} fill priority sizes="..." />
+            </div>
+          </div>
+        </MainLayout>
+      </div>
+    </section>
+  );
+}
+```
+
+**`HomeHeroSearch` (새로 분리된 클라이언트 컴포넌트):**
+
+```tsx
+"use client";
+
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+import { SearchInput } from "@/components/common/search-input";
+
+export function HomeHeroSearch() {
+  const router = useRouter();
+  const [searchQuery, setSearchQuery] = useState("");
+
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const trimmed = searchQuery.trim();
+    if (!trimmed) return;
+    router.push(`/busking-map?keyword=${encodeURIComponent(trimmed)}`);
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="mt-10 w-full max-w-115.75">
+      <SearchInput
+        theme="white"
+        value={searchQuery}
+        onChange={(e) => setSearchQuery(e.target.value)}
+        placeholder="지역명이나 장소를 검색해보세요"
+        aria-label="버스킹 장소 검색"
+      />
+    </form>
+  );
+}
+```
+
+이렇게 분리하면 `HomeHeroSection`은 서버에서 완전히 렌더링되고, `<link rel="preload">`가 SSR 응답의 `<head>`에 포함됩니다.
+
+---
+
+## 9. 미해결 이슈: Next.js fill 이미지의 fetchpriority 버그
+
+Server Component로 분리 후에도 Lighthouse의 "LCP image was not priority hinted" 감사 항목이 계속 경고를 표시했습니다.
+
+<Image
+  src={lcpFetchpriorityWarning}
+  alt="Lighthouse LCP request discovery 패널 — fetchpriority=high should be applied 경고가 표시된 스크린샷"
+  width={720}
+/>
+
+**원인 분석:**
+
+Lighthouse는 `<link rel="preload">` 태그에 `fetchpriority="high"`가 있는지 확인합니다.
+
+```html
+<!-- Lighthouse가 기대하는 형태 -->
+<link rel="preload" as="image" href="..." fetchpriority="high" />
+
+<!-- 실제로 생성된 형태 (fetchpriority 없음) -->
+<link rel="preload" as="image" href="..." />
+```
+
+Next.js의 `fill` prop을 사용하는 이미지에서는 SSR 시 생성되는 `<link rel="preload">` 태그에 `fetchpriority` 속성이 누락되는 알려진 이슈가 있습니다. (고정 크기 이미지, 즉 `width`와 `height`를 명시하는 경우에는 정상 적용됩니다.)
+
+**중요한 구분:**
+
+- `<img fetchpriority="high">` → 실제로 적용됨 (런타임에 브라우저가 읽음)
+- `<link rel="preload" fetchpriority="high">` → Lighthouse 감사 통과 (early discovery)
+
+즉, 실제 이미지 로딩에는 `fetchpriority="high"`가 적용되지만, Lighthouse가 검사하는 preload hint의 fetchpriority가 없어서 "미적용"으로 표시됩니다. **Lighthouse의 이 경고는 `fill` 이미지에서는 false negative에 가깝습니다.**
+
+---
+
+## 10. 88점 분석: 2점이 왜 안 올라가는가
+
+최종 측정: **88점, LCP 2.3s**
+
+Lighthouse 목표: 90점, LCP 2.1s
+
+**근본 원인: 폰트가 LCP 이미지를 차단**
+
+Lighthouse는 Simulated throttling(10Mbps, 40ms RTT)을 사용합니다. 이 환경에서의 네트워크 우선순위 경쟁:
+
+| 리소스            | 크기      | 브라우저 우선순위             |
+| ----------------- | --------- | ----------------------------- |
+| 폰트 파일들       | ~2MB 합계 | **High**                      |
+| LCP 이미지 (AVIF) | ~32KB     | Low → High (priority 설정 후) |
+
+문제는 폰트가 **High** 우선순위를 먼저 선점하고 있어서, 동일 우선순위로 경쟁하는 LCP 이미지가 뒤로 밀린다는 것입니다. 폰트 다운로드가 완료될 때까지 LCP 이미지가 충분한 대역폭을 받지 못합니다.
+
+**왜 폰트가 High인가?**
+CSS에 `font-display: optional`이나 `font-display: swap`이 없으면 브라우저는 폰트를 렌더링 차단 리소스로 취급합니다. FOUT(Flash of Unstyled Text) 방지를 위해 High 우선순위를 부여합니다.
+
+**이론적 해결책:**
+
+1. `font-display: optional` — 폰트 로드 타임아웃 설정
+2. 폰트 파일 분할 (subset) — 한국어 글리프만 포함한 최소 폰트
+3. `<link rel="preload">` + `fetchpriority="low"` 폰트 — 우선순위 낮추기
+
+단, 폰트 최적화는 타이포그래피 깨짐 등 부작용이 있어 신중하게 접근해야 합니다.
+
+---
+
+## 11. 배운 것들
+
+### ✅ 했던 것들 (효과 있음)
+
+- **Production 빌드에서 측정** — dev 서버 측정이 얼마나 잘못된 수치를 주는지 확인
+- **이미지 포맷을 AVIF로 변환** — 파일 크기 대폭 감소
+- **`sizes` prop 명시** — 불필요한 대형 이미지 요청 방지
+- **`priority` prop 적용** — LCP 이미지 우선순위 High로 설정
+- **Server Component 분리** — 클라이언트 경계를 최소 단위로 한정
+- **시크릿 모드에서 측정** — 확장 프로그램 오염 제거
+
+### ⚠️ 조심해야 할 것들
+
+- Lighthouse 점수는 네트워크 시뮬레이션 기반이므로 실제 사용자 경험과 다를 수 있음
+- `fetchpriority` 경고 중 일부는 Next.js `fill` 이미지의 알려진 이슈로 false negative
+- 폰트 최적화는 양날의 검 — FOUT/CLS 부작용 고려 필요
+
+### 📌 체크리스트 (Next.js 이미지 최적화)
+
+```
+☑ LCP 이미지가 어떤 요소인지 Lighthouse로 확인
+☑ LCP 이미지에 priority prop 설정
+☑ fill 이미지에 sizes prop 명시
+☑ AVIF 또는 WebP 포맷 사용
+☑ unoptimized={true} 제거 (필요한 경우만 사용)
+☑ LCP 이미지를 포함한 컴포넌트는 Server Component로 유지
+☑ 측정은 반드시 production 빌드 + 시크릿 모드에서
+```
+
+---
+
+## 참고 자료
+
+**Lighthouse & Core Web Vitals**
+
+- [Lighthouse performance scoring | Chrome for Developers](https://developer.chrome.com/docs/lighthouse/performance/performance-scoring)
+- [Web Vitals | web.dev](https://web.dev/articles/vitals)
+- [Largest Contentful Paint (LCP) | web.dev](https://web.dev/articles/lcp)
+- [Total Blocking Time (TBT) | web.dev](https://web.dev/articles/tbt)
+
+**Next.js 공식 문서**
+
+- [Next.js Image 컴포넌트 API Reference (App Router)](https://nextjs.org/docs/app/api-reference/components/image)
+- [Next.js Image Optimization 시작하기](https://nextjs.org/docs/app/getting-started/images)
+- [Next.js Server and Client Components](https://nextjs.org/docs/app/getting-started/server-and-client-components)
+- [Next.js use client 지시문](https://nextjs.org/docs/app/api-reference/directives/use-client)
+
+**Browser API / MDN**
+
+- [fetchpriority HTML 속성 | MDN](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Attributes/fetchpriority)
+- [font-display CSS 디스크립터 | MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/@font-face/font-display)
+- [Prevent layout shifting and flashes of invisible text (FOIT) | web.dev](https://web.dev/articles/preload-optional-fonts)
+
+**GitHub 관련 이슈**
+
+- [next/image priority prop과 fetchpriority="high" 동작 | vercel/next.js Discussion #39740](https://github.com/vercel/next.js/discussions/39740)
+- [App Router에서 next/image priority가 preload 태그를 생성하지 않는 이슈 | vercel/next.js Issue #43134](https://github.com/vercel/next.js/issues/43134)

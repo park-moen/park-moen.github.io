@@ -1,0 +1,341 @@
+---
+title: "TanStack Query + Intersection Observer로 구현하는 무한 스크롤"
+description: "useInfiniteQuery와 Intersection Observer로 무한 스크롤을 구현하고, Stale Closure와 불필요한 Observer 재생성 문제를 useRef와 React 19 ref callback으로 해결하는 방법을 다룹니다."
+pubDate: 2026-05-22T00:00:00+09:00
+slug: "2026/05/22/tanstack-query-infinite-scroll"
+tags: ["React", "TanStack Query", "Intersection Observer", "무한 스크롤", "TypeScript"]
+draft: false
+---
+
+## Part 1: 구현
+
+### 1. TanStack Query `useInfiniteQuery` 동작 원리
+
+#### useQuery vs useInfiniteQuery
+
+| 구분                 | useQuery       | useInfiniteQuery                 |
+| -------------------- | -------------- | -------------------------------- |
+| 데이터 형태          | 단일 응답      | `pages` 배열로 누적              |
+| 추가 페이지 로드     | 직접 구현 필요 | `fetchNextPage()` 제공           |
+| 다음 페이지 파라미터 | 없음           | `getNextPageParam`으로 자동 계산 |
+
+#### infiniteQueryOptions 설정
+
+TanStack Query v5에서는 `infiniteQueryOptions` 헬퍼로 쿼리 옵션을 별도 파일로 분리하는 패턴이 권장됩니다.
+
+```tsx
+// performance.query.ts
+import { infiniteQueryOptions } from "@tanstack/react-query";
+
+export function performanceListInfiniteQueryOptions(type: "upcoming" | "past") {
+  return infiniteQueryOptions({
+    queryKey: ["performance", type],       // type이 바뀌면 독립 쿼리로 취급
+    queryFn: async ({ pageParam, signal }) => {
+      return getPerformanceList(type, pageParam, { signal });
+    },
+    initialPageParam: 0,                   // 첫 번째 요청에 사용할 초기 페이지 파라미터
+    getNextPageParam: (lastPage) => {
+      return lastPage.hasNext ? lastPage.page + 1 : undefined; // undefined → hasNextPage: false
+    },
+    staleTime: 5 * 60 * 1000,             // 5분간 fresh 상태 유지
+  });
+}
+```
+
+#### data 구조
+
+`useInfiniteQuery`가 반환하는 `data.pages`는 페이지별 응답이 쌓이는 배열입니다. UI에서는 `flatMap`으로 평탄화합니다.
+
+```tsx
+// data.pages 구조
+[
+  { content: [...], page: 0, hasNext: true },
+  { content: [...], page: 1, hasNext: true },
+  { content: [...], page: 2, hasNext: false }, // 마지막 페이지
+]
+
+// 컴포넌트에서 사용
+const { data, fetchNextPage, hasNextPage, isFetchingNextPage } = useSuspenseInfiniteQuery(
+  performanceListInfiniteQueryOptions(validTab),
+);
+const performances = data.pages.flatMap((page) => page.content);
+```
+
+---
+
+### 2. Intersection Observer로 스크롤 감지
+
+#### 스크롤 이벤트 vs Intersection Observer
+
+- **스크롤 이벤트**: 스크롤마다 메인 스레드에서 콜백 실행 → throttle/debounce 직접 구현 필요, reflow 유발 가능
+- **Intersection Observer**: 브라우저 최적화 방식으로 처리 → 메인 스레드 비블로킹, throttle/debounce 불필요
+
+`threshold: 0.5`를 사용하면 sentinel 요소의 50%가 뷰포트에 진입할 때 콜백이 트리거되어 자연스러운 UX를 만들 수 있습니다.
+
+```ts
+{ threshold: 0.0 } // 1px이라도 보이면 즉시 트리거
+{ threshold: 0.5 } // 50% 보일 때 트리거 (무한 스크롤 권장)
+{ threshold: 1.0 } // 100% 완전히 보일 때 트리거
+```
+
+---
+
+### 3. 전체 구현 — Query 레이어와 UI 레이어
+
+- **API 레이어**: 서버에 요청하는 순수 함수. `signal`로 탭 전환 시 진행 중인 요청을 자동 취소합니다.
+- **Server Component**: `prefetchInfiniteQuery`로 첫 페이지를 서버에서 미리 로드해 초기 로딩을 제거합니다.
+- **Client Component**: `useSuspenseInfiniteQuery`로 데이터를 가져와 UI 컴포넌트에 전달합니다.
+
+Query 레이어는 섹션 1의 `performanceListInfiniteQueryOptions` 코드를 그대로 사용합니다. 아래는 스크롤 감지를 담당하는 UI 레이어 전체 코드입니다.
+
+#### UI 레이어 (스크롤 감지)
+
+```tsx
+// performance-list.tsx
+"use client";
+
+import { useEffect, useRef } from "react";
+
+interface PerformanceListProps {
+  performances: Performance[];
+  onLoadMore: () => void;
+  hasMore: boolean;
+  isLoading: boolean;
+}
+
+export function PerformanceList({ performances, onLoadMore, hasMore, isLoading }: PerformanceListProps) {
+  const observerTarget = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!observerTarget.current || !hasMore) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && hasMore && !isLoading) {
+          onLoadMore?.();
+        }
+      },
+      { threshold: 0.5 },
+    );
+
+    observer.observe(observerTarget.current);
+    return () => observer.disconnect();
+  }, [hasMore, isLoading, onLoadMore]);
+
+  return (
+    <div>
+      <div className="grid grid-cols-4 gap-6">
+        {performances.map((performance) => (
+          <PerformanceCard key={performance.performanceId} {...performance} />
+        ))}
+      </div>
+      {/* sentinel: 이 div가 화면에 보이면 다음 페이지 요청 */}
+      {hasMore && (
+        <div ref={observerTarget} className="h-20 flex items-center justify-center">
+          {isLoading && <div>로딩중...</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+### 4. 동작 시퀀스
+
+레이어들이 연동되는 전체 흐름입니다.
+
+```
+사용자 스크롤 → sentinel div가 뷰포트에 진입
+    ↓
+isIntersecting && hasMore && !isLoading → fetchNextPage()
+    ↓
+getNextPageParam → queryFn({ pageParam: N }) → API 호출
+    ↓
+응답 수신 → data.pages에 추가 → flatMap 재계산 → UI 리렌더링
+    ↓
+lastPage.hasNext === false → sentinel 언마운트 → 감지 종료
+```
+
+---
+
+## Part 2: 심화 — Observer 최적화
+
+Part 1의 구현은 기능상 올바르지만, `useEffect` 의존성 배열로 인해 불필요한 작업이 반복됩니다.
+
+---
+
+### 5. 실제 문제: 불필요한 Observer 재생성
+
+`useEffect` 자체는 리렌더링을 유발하지 않습니다. 문제는 `isLoading`이 API 호출 한 번에 `false → true → false`로 **두 번** 변경되어, effect도 두 번 재실행된다는 점입니다.
+
+```
+공연 목록 로드 완료 → isLoading: false
+──────────────────────────────────────────────────
+스크롤 → sentinel 감지 → onLoadMore() 호출
+isLoading: false → true   ← useEffect 재실행 ① (observer disconnect → reconnect)
+API 응답 수신 완료
+isLoading: true → false   ← useEffect 재실행 ② (observer disconnect → reconnect)
+──────────────────────────────────────────────────
+페이지 하나 로드할 때마다 observer 재생성이 2번 발생
+```
+
+---
+
+### 6. Stale Closure 문제 — dep에서 단순 제거하면 안 되는 이유
+
+`isLoading`을 dep에서 제거하면, observer 콜백 내부의 `isLoading`은 effect가 처음 실행된 시점의 값에 **고정**됩니다.
+
+```
+렌더링 1: isLoading=false
+  → effect 실행, isLoading=false 캡처됨
+  → observer 콜백: "isLoading은 false야"
+
+렌더링 2: isLoading=true (다음 페이지 요청 중)
+  → dep 변화 없음 → effect 재실행 안 됨
+  → observer 콜백: 여전히 "isLoading은 false야" ← 낡은 값!
+  → sentinel이 감지되면 isLoading=true인데도 onLoadMore() 호출 ❌
+
+렌더링 3: isLoading=false (응답 완료)
+  → dep 변화 없음 → effect 재실행 안 됨
+```
+
+데이터를 불러오는 중에도 중복 요청이 발생합니다. 이것이 Stale Closure 버그이며, ESLint `exhaustive-deps` 규칙이 이 문제를 방지하기 위해 존재합니다.
+
+---
+
+### 7. 해결책 1: useRef로 최신값 참조
+
+`useRef`는 컴포넌트 생명주기 내내 **동일한 객체 참조**를 유지합니다. 렌더링마다 `ref.current`를 최신값으로 동기화하면, 클로저가 캡처한 객체는 변하지 않으면서 `.current`를 통해 항상 최신값을 읽을 수 있습니다. ESLint도 `ref` 객체는 안정적이라고 인식해 의존성 배열 경고를 표시하지 않습니다.
+
+```tsx
+const isLoadingRef = useRef(isLoading);
+isLoadingRef.current = isLoading; // 렌더링마다 최신값으로 동기화
+```
+
+#### Before / After 비교
+
+```tsx
+// ❌ Before: isLoading이 바뀔 때마다 observer 재생성 (페이지 로드당 2번)
+useEffect(() => {
+  const observer = new IntersectionObserver(
+    (entries) => {
+      if (entries[0].isIntersecting && hasMore && !isLoading) {
+        onLoadMore();
+      }
+    },
+    { threshold: 0.5 },
+  );
+  observer.observe(sentinelRef.current);
+  return () => observer.disconnect();
+}, [hasMore, isLoading, onLoadMore]); // isLoading 포함
+```
+
+```tsx
+// ✅ After: hasMore/onLoadMore 변경 시에만 observer 재생성
+const isLoadingRef = useRef(isLoading);
+isLoadingRef.current = isLoading;
+
+useEffect(() => {
+  if (!sentinelRef.current || !hasMore) return;
+
+  const observer = new IntersectionObserver(
+    (entries) => {
+      if (entries[0].isIntersecting && !isLoadingRef.current) { // 항상 최신값 참조
+        onLoadMore();
+      }
+    },
+    { threshold: 0.5 },
+  );
+  observer.observe(sentinelRef.current);
+  return () => observer.disconnect();
+}, [hasMore, onLoadMore]); // isLoading 제거 가능
+```
+
+---
+
+### 8. 해결책 2: React 19 ref callback 패턴
+
+React 19부터 ref callback에서 **cleanup 함수를 반환**할 수 있습니다. `useEffect` 없이도 observer 생명주기를 sentinel div의 마운트/언마운트와 정확히 일치시킬 수 있습니다.
+
+```tsx
+import { useCallback, useRef } from "react";
+
+function PerformanceList({ performances, onLoadMore, hasMore, isLoading }: PerformanceListProps) {
+  const isLoadingRef = useRef(isLoading);
+  isLoadingRef.current = isLoading;
+
+  const sentinelCallbackRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      if (!node) return; // null이면 React가 cleanup 호출 (언마운트 시)
+
+      const observer = new IntersectionObserver(
+        (entries) => {
+          if (entries[0].isIntersecting && !isLoadingRef.current) {
+            onLoadMore();
+          }
+        },
+        { threshold: 0.5 },
+      );
+
+      observer.observe(node);
+      return () => observer.disconnect(); // React 19: cleanup 함수 반환 지원
+    },
+    [onLoadMore],
+  );
+
+  return (
+    <section>
+      {performances.map((performance) => (
+        <PerformanceCard key={performance.performanceId} {...performance} />
+      ))}
+      {/* hasMore가 false가 되면 언마운트 → cleanup 자동 실행 */}
+      {hasMore && (
+        <div ref={sentinelCallbackRef} className="flex h-20 items-center justify-center">
+          {isLoading && <Spinner className="size-6 text-gray-400" />}
+        </div>
+      )}
+    </section>
+  );
+}
+```
+
+`hasMore`가 `false`가 되면 sentinel div가 언마운트되고, React가 cleanup 함수(`observer.disconnect()`)를 자동으로 호출합니다.
+
+---
+
+### 9. 세 접근법 비교
+
+| 방식                   | observer 재생성 시점                        | Stale Closure 위험 | useEffect 필요 | React 19 필요 |
+| ---------------------- | ------------------------------------------- | ------------------ | -------------- | ------------- |
+| isLoading을 dep에 포함 | `isLoading` 변경 시마다 (페이지 로드당 2회) | 없음               | 필요           | 불필요        |
+| `useRef` 개선          | `hasMore` 또는 `onLoadMore` 변경 시만       | 없음               | 필요           | 불필요        |
+| React 19 ref callback  | sentinel 마운트/언마운트 시                 | 없음               | 불필요         | 필요          |
+
+React 19 환경이라면 ref callback 패턴이 가장 선언적이고 효율적입니다. React 18 이하라면 `useRef` 개선 방식을 사용하세요.
+
+---
+
+## Part 3: 마무리
+
+### 10. 핵심 요약
+
+**1. useEffect ≠ 리렌더링**
+`useEffect` 자체는 리렌더링을 유발하지 않습니다. 내부에서 `setState`를 호출할 때만 리렌더링이 발생합니다.
+
+**2. dep 배열 최적화**
+`isLoading`처럼 자주 변경되는 값이 의존성에 포함되면 effect가 불필요하게 재실행됩니다. 실제로 필요한 시점에만 재실행되도록 의존성을 최소화하는 것이 중요합니다.
+
+**3. Stale Closure 해결: useRef**
+dep에서 단순 제거하면 낡은 클로저 참조 문제가 생깁니다. `useRef`는 동일한 객체 참조를 유지하므로, 렌더링마다 `ref.current`를 최신값으로 동기화하면 Stale Closure 없이 항상 최신값을 참조할 수 있습니다.
+
+**4. React 19 ref callback**
+React 19의 ref callback은 cleanup 함수 반환을 지원합니다. `useEffect` 없이 DOM 요소의 마운트/언마운트에 observer 생명주기를 정확히 맞출 수 있어, 더 선언적인 코드 작성이 가능합니다.
+
+---
+
+### 참고 자료
+
+- [Ref Callbacks, React 19 그리고 Compiler (번역)](https://www.gwansik.dev/posts/ref-callbacks-react-19-and-the-compiler)
+- [Infinite Queries — TanStack Query 공식 문서](https://tanstack.com/query/latest/docs/framework/react/guides/infinite-queries)
