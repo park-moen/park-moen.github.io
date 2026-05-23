@@ -1,0 +1,406 @@
+---
+title: "React Hook Form 리렌더 최적화: watch부터 useFormState까지"
+description: "React DevTools Profiler로 타이핑 시 75개 컴포넌트가 리렌더되는 문제를 발견하고, watch → useWatch → useFormState({ name }) 순으로 구독 범위를 좁혀 해결한 과정을 기록합니다."
+pubDate: 2026-05-23T00:00:00+09:00
+slug: "2026/05/23/rhf-rerender-optimization"
+tags: ["React", "React Hook Form", "Performance"]
+draft: false
+---
+
+import { Image } from "astro:assets";
+import init from "./init.png";
+import watchToUseWatch from "./watch-to-useWatch.png";
+import watchToUseWatchSpace from "./watch-to-useWatch-space.png";
+import useWatchSeparateComponent from "./use-watch-separate-component.png";
+import consoleCount from "./console-count.png";
+import finalStep01 from "./final-step01.png";
+import finalStep01Space from "./final-step01-space.png";
+
+> React Hook Form의 `watch`, `useWatch`, `formState`, `useFormState` 모두 "어디서 무엇을 구독하느냐"가 리렌더 범위를 결정합니다. 이 글은 하나의 필드를 입력하면 75개 컴포넌트가 리렌더되는 문제를 React DevTools Profiler로 발견하고, 구독 범위를 단계적으로 좁혀 **실제 렌더 함수 실행을 1개로 최소화**한 과정을 기록합니다.
+
+---
+
+## 상황: 예상과 다른 Profiler 결과
+
+공연 등록 멀티 스텝 폼에서 RHF(React Hook Form)의 비제어 컴포넌트 패턴을 활용해 **"타이핑 시 불필요한 리렌더를 구조적으로 차단했다"** 고 생각했습니다.
+
+그러나 React DevTools Profiler로 측정한 결과, **팀 이름 Input 필드에 입력할 때마다 75개 컴포넌트가 리렌더되고 있었습니다.**
+
+<Image src={init} width={720} alt="초기 상태 — watch() 사용 시 RegisterModal 하위 전체 리렌더" />
+
+---
+
+## 문제 코드
+
+```tsx
+// src/components/performance/steps/step-01.tsx
+
+export function Step01() {
+  const {
+    register,
+    control,
+    watch,
+    formState: { errors },
+  } = useFormContext<PerformanceRegisterForm>();
+  const teamName = watch("teamName"); // ← 문제의 코드
+
+  return (
+    // ...
+    <FormInput
+      showCount
+      maxLength={20}
+      currentCount={teamName?.length || 0} // 글자 수 표시용
+    />
+  );
+}
+```
+
+`teamName`의 글자 수를 표시하기 위해 `watch('teamName')`을 사용했습니다.
+
+---
+
+## 동작 원리 비교
+
+### watch()
+
+`watch()`는 **`useForm`을 호출한 컴포넌트** 내부에서 `setState`를 트리거합니다.
+
+```
+RegisterModal (useForm 소유자)
+  └─ FormProvider
+       └─ Step01
+            └─ watch('teamName') ← 구독 요청
+```
+
+Step01이 `useFormContext()`를 통해 `watch`를 가져오더라도, 실제 구독 메커니즘은 `useForm` 인스턴스에 등록됩니다. 값이 변경되면 `useForm`이 있는 **RegisterModal**에서 `setState`가 호출되고, RegisterModal의 하위 트리 전체가 리렌더됩니다.
+
+```
+teamName 필드 입력
+  → RHF 내부 store 업데이트
+  → RegisterModal.setState 호출 (원인: watch 구독)
+  → RegisterModal 리렌더
+  → RegisterModal 하위 75개 컴포넌트 전부 리렌더
+```
+
+### useWatch()
+
+`useWatch()`는 **호출한 컴포넌트 자신** 내부에서 `useState`를 관리합니다. `watch()`처럼 RegisterModal을 건드리지 않습니다.
+
+그러나 `useWatch()`를 **Step01 안에 그대로 두면** 여전히 Step01이 리렌더되고, Step01의 자식(FormInput 등) 컴포넌트도 전부 리렌더됩니다.
+
+```
+teamName 필드 입력
+  → RHF 내부 store 업데이트
+  → Step01.setState 호출 (원인: useWatch 구독)
+  → Step01 리렌더
+  → FormInput(contactNumber), FormInput(email)... 모두 리렌더
+```
+
+> **📌 핵심** RHF의 비제어 컴포넌트(`register`)는 **자신이 리렌더를 트리거하지 않는 것**입니다. 부모가 리렌더되면 자식은 기본적으로 따라 리렌더됩니다. 이 둘은 다른 이야기입니다.
+
+### formState 구독
+
+`useFormContext()`로 `formState.errors`를 구독하는 컴포넌트도 리렌더의 원인이 됩니다. RHF는 입력 이벤트마다 내부적으로 `_subjects.state.next()`를 호출하여 `isDirty`, `dirtyFields` 등을 갱신합니다. 이때 `formState`를 구독 중인 컴포넌트(Step01)가 알림을 받아 리렌더될 수 있습니다.
+
+```
+teamName 필드 입력
+  → RHF 내부 store 업데이트 (_subjects.state.next 호출)
+  → Step01의 formState 구독 트리거
+  → Step01 리렌더
+  → 자식 FormInput들 모두 리렌더
+```
+
+---
+
+## 단계적 해결 과정
+
+### Step 1 — watch() → useWatch() (부분 개선)
+
+리렌더 시작점을 RegisterModal → Step01으로 내립니다.
+
+|                      | `watch()` | `useWatch()` in Step01 |
+| -------------------- | --------- | ---------------------- |
+| RegisterModal 리렌더 | ✅        | ❌                     |
+| Step01 리렌더        | ✅        | ✅                     |
+| Step01 자식들 리렌더 | ✅        | ✅                     |
+
+RegisterModal 수준의 75개 리렌더는 막히지만, Step01 내부 FormInput들은 여전히 함께 리렌더됩니다.
+
+<Image src={watchToUseWatch} width={720} alt="Step 1 — useWatch 변환 후 Profiler" />
+
+### Step 2 — useWatch를 별도 컴포넌트로 분리
+
+`useWatch`의 `setState`가 발생하는 범위를 글자 수 표시만 담당하는 작은 컴포넌트로 격리합니다.
+
+```tsx
+function TeamNameCharCount() {
+  const teamName = useWatch<PerformanceRegisterForm, "teamName">({ name: "teamName" });
+  return <>{teamName?.length ?? 0}</>;
+}
+
+export function Step01() {
+  const {
+    register,
+    formState: { errors },
+  } = useFormContext<PerformanceRegisterForm>();
+
+  return <FormInput {...register("teamName")} showCount maxLength={20} currentCount={<TeamNameCharCount />} />;
+}
+```
+
+`FormInput`의 `currentCount` prop을 `number`에서 `React.ReactNode`로 변경합니다.
+
+```ts
+// src/components/common/input/input.tsx
+interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
+  currentCount?: React.ReactNode;
+}
+```
+
+이 상태에서도 **Step01이 `formState.errors`를 구독하고 있어** 다른 FormInput들이 여전히 리렌더됩니다.
+
+### Step 3 — 필드별 컴포넌트 분리로 formState 구독 격리 (부분 해결)
+
+각 필드를 담당하는 독립 컴포넌트로 분리하여 **자신의 `errors`만 구독**하게 합니다. `Step01` 자체는 `useFormContext` 없이 레이아웃 조합만 담당합니다.
+
+```tsx
+function TeamNameField() {
+  const {
+    register,
+    formState: { errors },
+  } = useFormContext<PerformanceRegisterForm>();
+  return (
+    <div className="max-w-146.5 space-y-2">
+      <FormInput
+        {...register("teamName")}
+        label="팀 이름"
+        error={errors.teamName?.message}
+        showCount
+        maxLength={20}
+        currentCount={<TeamNameCharCount />}
+      />
+    </div>
+  );
+}
+
+function ContactNumberField() {
+  const {
+    register,
+    formState: { errors },
+  } = useFormContext<PerformanceRegisterForm>();
+  const contactNumberProps = register("contactNumber");
+  return (
+    <FormInput
+      {...contactNumberProps}
+      label="공연자 전화번호"
+      error={errors.contactNumber?.message}
+      onChange={(e) => {
+        e.target.value = formatPhoneNumber(e.target.value);
+        contactNumberProps.onChange(e);
+      }}
+    />
+  );
+}
+
+// EmailField, InstagramField도 동일한 패턴
+
+export function Step01() {
+  // useFormContext 없음 — 레이아웃만 담당
+  return (
+    <div className="flex flex-col gap-6">
+      <TeamNameField />
+      <div className="flex w-full gap-6">
+        <ContactNumberField />
+        <EmailField />
+      </div>
+      <InstagramField />
+    </div>
+  );
+}
+```
+
+<br />
+
+<Image src={useWatchSeparateComponent} width={720} alt="Step 2/3 — useWatch 분리 + 필드별 컴포넌트 분리 후 Profiler" />
+
+#### 여전히 남은 문제: required 필드의 리렌더
+
+Profiler로 재확인한 결과, `teamName` 타이핑 시 `ContactNumberField`와 `EmailField`는 여전히 리렌더되고, `InstagramField`만 리렌더되지 않는 현상이 발견되었습니다.
+
+**원인은 `formState.errors` 구독 범위와 Zod 스키마의 required 여부의 조합입니다.**
+
+타이핑이 발생하면 RHF는 `_subjects.state.next()`를 호출해 `isDirty` 등 폼 상태를 갱신합니다. 이 과정에서 Zod 스키마 기준 **required로 정의된 필드**(`contactNumber`, `email`)의 `errors` 참조가 갱신됩니다. 이를 구독 중인 `ContactNumberField`와 `EmailField`가 알림을 받아 리렌더됩니다.
+
+반면 `instagramUrl`은 Zod 스키마에서 optional로 정의되어 있어, 다른 필드 타이핑 시 `errors.instagramUrl`의 참조가 항상 `undefined`로 안정적입니다. 변화가 없으니 RHF가 `InstagramField`를 리렌더하지 않습니다.
+
+```
+teamName 타이핑
+  → RHF 내부 store 업데이트 + required 필드 errors 참조 갱신
+  → formState.errors를 구독 중인 ContactNumberField, EmailField 리렌더 ✅
+  → errors.instagramUrl은 undefined로 변화 없음 → InstagramField 리렌더 없음 ❌
+```
+
+> **📌 핵심** `useFormContext().formState.errors`는 "어떤 필드의 errors인가"와 무관하게 **errors 객체 전체**를 구독합니다. required 필드는 폼 상태 변경 시 errors 참조가 갱신될 수 있어, 해당 필드와 무관한 타이핑에도 리렌더가 발생합니다.
+
+### Step 4 — `useFormState({ name })`로 필드별 구독 격리 (최종 해결)
+
+`useFormState({ name: 'fieldName' })`를 사용하면 **해당 필드의 상태 변경에만** 반응합니다. `useFormContext().formState`처럼 전체 errors 객체를 구독하지 않으므로, 다른 필드 타이핑 시 리렌더가 발생하지 않습니다.
+
+```tsx
+import { useFormContext, useFormState } from "react-hook-form";
+
+function ContactNumberField() {
+  const { register } = useFormContext<PerformanceRegisterForm>();
+  const { errors } = useFormState<PerformanceRegisterForm>({ name: "contactNumber" });
+  const contactNumberProps = register("contactNumber");
+  return (
+    <div className="flex-1 space-y-2">
+      <FormInput
+        {...contactNumberProps}
+        label="공연자 전화번호"
+        required
+        placeholder="전화번호를 적어주세요"
+        error={errors.contactNumber?.message}
+        inputMode="tel"
+        onChange={(e) => {
+          e.target.value = formatPhoneNumber(e.target.value);
+          contactNumberProps.onChange(e);
+        }}
+      />
+    </div>
+  );
+}
+
+function EmailField() {
+  const { register } = useFormContext<PerformanceRegisterForm>();
+  const { errors } = useFormState<PerformanceRegisterForm>({ name: "email" });
+  return (
+    <div className="flex-1 space-y-2">
+      <FormInput
+        {...register("email")}
+        label="공연자 이메일"
+        required
+        placeholder="이메일을 적어주세요"
+        error={errors.email?.message}
+      />
+    </div>
+  );
+}
+```
+
+<br />
+
+<Image src={finalStep01} width={720} alt="Step 4 — useFormState({ name }) 적용 후 최종 Profiler" />
+
+#### `useFormState({ name })`에서도 bail-out이 발생하는 이유
+
+Profiler에서 `ContactNumberField`, `EmailField`가 노란색으로 표시될 수 있습니다. `useFormState({ name })`으로 구독을 좁혔음에도 이 현상이 발생하는 이유는 `isDirty` 글로벌 상태 업데이트 때문입니다.
+
+RHF 내부의 `shouldSubscribeByName` 함수를 보면 `name`이 있어도 bail-out이 발생하는 이유를 알 수 있습니다.
+
+```ts
+// RHF 내부 코드 (단순화)
+const shouldSubscribeByName = (name, signalName, exact) =>
+  !name ||
+  !signalName ||   // ← signalName이 undefined면 무조건 true 반환
+  name === signalName ||
+  (!exact && ...);
+```
+
+`teamName`에 **첫 글자를 입력**하는 순간, 두 가지 상태가 동시에 변합니다.
+
+```
+1. dirtyFields.teamName: undefined → true  (필드 특정, name: 'teamName' 포함)
+2. isDirty:              false → true       (글로벌 변화, name 없음) ← 핵심
+```
+
+`isDirty` 변화를 알릴 때 RHF는 `name` 없이 `_subjects.state.next()`를 호출합니다. `signalName`이 `undefined`이면 `name` 구독 설정과 무관하게 모든 `useFormState` 구독자에게 알림이 전달됩니다.
+
+> **📌 참고** 이 현상은 `teamName` **첫 타이핑 시에만** 발생합니다. `isDirty false → true` 전환은 한 번만 일어나기 때문입니다. 이후 다른 필드를 타이핑할 때는 `isDirty`가 이미 `true`이므로 글로벌 업데이트가 발생하지 않습니다.
+
+---
+
+## Profiler 노란색 = 실제 리렌더가 아닐 수 있다
+
+`useFormState({ name })` 적용 후 Profiler에서 `ContactNumberField`와 `EmailField`가 여전히 노란색으로 표시되는 것을 보고 리렌더가 발생한다고 오해할 수 있습니다. 그러나 `console.count`로 확인하면 렌더 함수가 실행되지 않습니다.
+
+<Image src={consoleCount} width={720} alt="console.count로 실제 컴포넌트 리렌더 확인" />
+
+이는 **bail-out render** 패턴 때문이며, React DevTools의 알려진 표시 방식입니다.
+
+> **📌 참고** 관련 React 이슈: [facebook/react#19778](https://github.com/facebook/react/issues/19778)
+
+<Image src={finalStep01Space} width={720} alt="bail-out render 패턴 — 노란색 부모 + 회색 사선 자식" />
+
+### bail-out render 동작 흐름
+
+```
+1. useFormState가 상태 업데이트를 스케줄링
+2. React가 ContactNumberField fiber를 방문 → Profiler에 노란색으로 기록됨
+3. 이전 state와 새 state 비교 → 동일 (errors.contactNumber 변화 없음)
+4. 렌더 함수 실행 없이 중단 (bail-out)
+5. 자식들(FormInput, Label)은 처리 안 함 → 회색 사선 패턴
+```
+
+### Profiler 색상 의미
+
+| 색상                    | 의미                                                                          |
+| ----------------------- | ----------------------------------------------------------------------------- |
+| 노란색 / 주황색 (solid) | 렌더 함수 실행 **또는** fiber 방문 후 bail-out (두 경우 모두 동일하게 표시됨) |
+| 회색 + 사선 패턴        | fiber 방문조차 하지 않음 (완전히 건너뜀)                                      |
+
+> **⚠️ 주의** Profiler의 노란색만으로 실제 렌더 여부를 판단하면 안 됩니다. `console.count`를 렌더 함수 내부에 배치하여 실제 실행 여부를 직접 확인하는 것이 더 정확합니다.
+
+### 최종 컴포넌트별 동작 정리
+
+| 컴포넌트             | 렌더 함수 실행 | Profiler 색상     | 이유                                            |
+| -------------------- | :------------: | ----------------- | ----------------------------------------------- |
+| `TeamNameCharCount`  |    ✅ 실행     | 노란색            | `useWatch` 구독으로 실제 re-render              |
+| `ContactNumberField` |   ❌ 미실행    | 노란색 (bail-out) | fiber 방문 후 state 동일 → 조기 종료            |
+| `EmailField`         |   ❌ 미실행    | 노란색 (bail-out) | fiber 방문 후 state 동일 → 조기 종료            |
+| `InstagramField`     |   ❌ 미실행    | 회색 사선         | `isDirty` 글로벌 업데이트에서도 fiber 방문 없음 |
+
+---
+
+## 리렌더 범위 최종 비교
+
+| 패턴                                                       | 리렌더 범위                                                          |
+| ---------------------------------------------------------- | -------------------------------------------------------------------- |
+| `watch()` in Step01                                        | RegisterModal 하위 전체 (~75개)                                      |
+| `useWatch()` in Step01                                     | Step01 + 자식들                                                      |
+| `useWatch()` 별도 컴포넌트 + `formState` in Step01         | TeamNameCharCount + 다른 FormInput들 (formState 구독 때문)           |
+| 필드별 컴포넌트 분리 + `useFormContext().formState.errors` | ContactNumberField, EmailField (required 필드 errors 참조 갱신)      |
+| 필드별 컴포넌트 분리 + `useFormState({ name })`            | TeamNameCharCount만 실제 렌더, 나머지는 bail-out 또는 완전 건너뜀 ✅ |
+
+---
+
+## 핵심 교훈
+
+> **결과** 타이핑 시 75개 컴포넌트 리렌더 → `TeamNameCharCount` **1개만 실제 렌더 함수 실행** (`console.count` 검증 기준)
+
+**"구독은 그것을 실제로 소비하는 가장 작은 컴포넌트 안에, 그리고 가장 좁은 범위로 격리하라."**
+
+RHF에서 리렌더 범위를 결정하는 것은 **어느 컴포넌트가 무엇을 구독하느냐**입니다.
+
+- `watch()` → `useForm` 소유자에서 setState 발생 (트리 전체 리렌더)
+- `useWatch()` → 호출한 컴포넌트에서 setState 발생 (해당 컴포넌트 + 자식 리렌더)
+- `useFormContext().formState.errors` → **전체 errors 객체 구독**, required 필드는 폼 상태 변경 시 갱신될 수 있음
+- `useFormState({ name })` → **해당 필드의 상태만 구독**, 글로벌 업데이트 시 bail-out으로 렌더 함수 실행 차단
+
+Profiler의 노란색이 곧 실제 리렌더를 의미하지 않습니다. `console.count`로 렌더 함수 실행 여부를 직접 확인하는 습관이 중요합니다.
+
+---
+
+## 참고 자료
+
+**React Hook Form**
+
+- [useWatch API Reference](https://react-hook-form.com/docs/usewatch)
+- [useFormState API Reference](https://react-hook-form.com/docs/useformstate)
+- [formState API Reference](https://react-hook-form.com/docs/useform/formstate)
+
+**React 내부 동작**
+
+- [React19 Internals 3: Bailout](https://ted-projects.com/react19-internals-3) — React가 bail-out을 판단하는 내부 메커니즘(lanes, childLanes, props 비교)을 설명합니다. 이 글의 bail-out render 섹션과 직접 관련됩니다.
+- [NAVER D2 Hello World](https://d2.naver.com/helloworld/2690975)
+- [React GitHub Issue #19778](https://github.com/facebook/react/issues/19778) — Profiler에서 bail-out 컴포넌트가 노란색으로 표시되는 알려진 동작에 대한 논의입니다.
