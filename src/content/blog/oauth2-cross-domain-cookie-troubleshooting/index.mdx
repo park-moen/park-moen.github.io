@@ -1,0 +1,385 @@
+---
+title: "OAuth2 쿠키 인증 트러블슈팅: Cross-Domain Cookie 접근 불가 이슈"
+description: "Kakao OAuth2 로그인 후 Cross-Domain 환경에서 HttpOnly 쿠키에 접근할 수 없는 문제를 분석하고, 4가지 해결 방법을 비교합니다."
+pubDate: 2026-01-31T00:00:00+09:00
+slug: "2026/01/31/oauth2-cross-domain-cookie-troubleshooting"
+tags: ["OAuth2", "Cookie", "Next.js", "CORS", "Troubleshooting"]
+draft: false
+---
+
+import { Image } from "astro:assets";
+import beforeConsole from "./before-console.png";
+
+## 1. 문제 상황
+
+### 현재 아키텍처
+
+- **Frontend**: `localhost:3000` (Next.js)
+- **Backend**: `unibusk.site` (Spring Boot)
+- **인증 방식**: Kakao OAuth2 + HttpOnly Cookie
+
+### 발생한 문제
+
+OAuth2 로그인 성공 후 FE 콜백 페이지에서 인증 쿠키에 접근할 수 없어 인증 상태 확인 및 API 요청이 불가능한 상황
+
+---
+
+## 2. 인증 플로우 (BE OAuth2 워크플로우 기반)
+
+```
+Step 1: 사용자 "로그인" 버튼 클릭
+
+Step 2: FE - 로그인 버튼 클릭 시
+└─ window.location.href = "<https://unibusk.site/api/auths/login?state=http%3A%2F%2Flocalhost%3A3000%2Fcallback>"
+   → 브라우저가 BE 엔드포인트로 리다이렉트
+
+Step 3: BE - RedirectUrlFilter에서 state 처리
+└─ 내부적으로 /oauth2/authorization/kakao로 리다이렉트
+   → state 쿠키에 FE callback URL 저장
+
+Step 4: 사용자 카카오 로그인
+└─ 카카오 인증 페이지에서 로그인 완료
+
+Step 5: 카카오 → BE - 인증 코드 전달
+└─ <https://unibusk.site/api/auths/login?code=xxx>
+
+Step 6: BE - AuthService.handleLoginSuccess 호출
+└─ 토큰 발급 (Access/Refresh Token)
+   → TokenInjector를 통해 쿠키에 저장
+
+Step 7: BE - OAuth2LoginSuccessHandler.redirectToSuccessUrl 호출
+└─ HTTP/1.1 302 Found
+   ├─ Set-Cookie: accessToken=xxx; Domain=unibusk.site; Secure; HttpOnly
+   ├─ Set-Cookie: refreshToken=yyy; Domain=unibusk.site; Secure; HttpOnly
+   └─ Location: <http://localhost:3000/oauth-callback/kakao>
+
+   ❌ **문제 발생 지점**:
+   브라우저가 쿠키를 unibusk.site 도메인에 저장한 후 localhost로 리다이렉트
+
+Step 8: FE - /oauth-callback/kakao 페이지
+└─ 쿠키 파라미터 및 쿠키 처리
+   → 신규 사용자 → 회원가입 페이지
+   → 기존 사용자 → 홈 화면
+
+   ❌ localhost에서 unibusk.site 쿠키 접근 불가
+```
+
+---
+
+## 3. 근본 원인: 리다이렉트 시점의 쿠키 도메인 격리
+
+### 핵심 문제
+
+`window.location.href`로 OAuth2 로그인 플로우를 시작하면, **BE가 로그인 성공 후 설정한 쿠키는 `unibusk.site` 도메인에 저장되지만, 리다이렉트로 `localhost`로 전환되는 순간 해당 쿠키에 접근할 수 있는 기술적 경로가 존재하지 않습니다**.
+
+### 브라우저의 쿠키 저장 메커니즘
+
+#### 1. 쿠키는 정상적으로 저장됨
+
+```
+BE 응답 (Step 7):
+HTTP/1.1 302 Found
+Set-Cookie: accessToken=xxx; Domain=unibusk.site; Secure; HttpOnly
+Location: <http://localhost:3000/oauth-callback/kakao>
+
+→ 브라우저는 Set-Cookie를 보고 자동으로 쿠키 저장
+→ 그 후 Location 헤더를 따라 localhost로 이동
+```
+
+**중요**: `window.location.href` 사용 시 FE 코드는 이 응답을 가로챌 수 없습니다. 모든 처리는 브라우저가 직접 수행합니다.
+
+#### 2. 쿠키 저장소는 도메인별로 격리됨
+
+```
+브라우저 쿠키 저장소:
+
+[<https://unibusk.site>]
+├─ accessToken: eyJhbGc...
+└─ refreshToken: eyJhbGc...
+
+[<http://localhost:3000>]
+└─ (비어있음)
+
+→ 브라우저 보안 정책: 각 도메인은 자신의 저장소만 접근 가능
+→ localhost 컨텍스트에서는 unibusk.site 저장소를 볼 수 없음
+```
+
+#### 3. 리다이렉트 후 상태
+
+```
+Step 8: FE (localhost:3000/oauth-callback/kakao)
+현재 실행 컨텍스트:
+├─ document.domain: "localhost"
+├─ 쿠키 저장 위치: unibusk.site (다른 도메인)
+└─ 결과: JavaScript/API 어떤 방법으로도 쿠키 접근 불가
+```
+
+<br />
+
+<Image
+  src={beforeConsole}
+  width={720}
+  alt="localhost에서 document.cookie는 Next.js HMR 쿠키(__next_hmr_refresh_hash__)만 표시되고 AT/RT는 없음을 보여주는 콘솔 스크린샷"
+/>
+
+#### 왜 FE가 개입할 수 없는가?
+
+```
+[리다이렉트 체인]
+FE (localhost)
+    ↓ window.location.href 실행
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[브라우저가 직접 처리 - JS 코드 실행 권한 없음]
+    ↓
+BE (unibusk.site) OAuth 처리
+    ↓
+BE가 Set-Cookie + 302 Redirect 응답
+    ↓
+[브라우저가 직접 처리 - JS 코드 실행 권한 없음]
+├─ 쿠키를 unibusk.site에 저장
+└─ localhost:3000으로 이동
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    ↓
+FE (localhost) 페이지 렌더링 시작
+└─ 이미 localhost 컨텍스트로 전환됨
+   → unibusk.site 쿠키는 접근 불가능한 영역
+```
+
+---
+
+## 4. 시도한 해결 방법 및 실패 원인
+
+### 4.1 Route Handler를 통한 쿠키 전달
+
+**시도한 방법**:
+
+```tsx
+// app/api/members/me/route.ts
+export async function GET() {
+  const cookieStore = await cookies();
+  // cookieStore에는 어떠한 cookie 값이 존재하지 않음
+
+  const response = await fetch(`${ENV.API_URL}/api/members/me`, {
+    method: "GET",
+    headers: {
+      Cookie: cookieStore.toString(),
+    },
+    cache: "no-store",
+  });
+
+  const data = await response.json();
+
+  return NextResponse.json(data, { status: 200 });
+}
+```
+
+**실패 이유**:
+
+1. **Route Handler가 호출되지 않음**:
+   - BE가 브라우저에게 `http://localhost:3000/oauth-callback`로 이동시킴 (Next 서버 자체가 실행되지 않음)
+   - 브라우저가 **페이지를 직접 렌더링** (API Route 건너뜀)
+   - Route Handler는 클라이언트가 명시적으로 요청할 때만 실행
+2. **토큰 교환 API 부재**:
+   - 현재 BE는 리다이렉트 응답에만 쿠키를 포함
+   - 별도의 토큰을 조회할 수 있는 엔드포인트가 존재하지 않음
+3. **쿠키가 이미 없음**:
+
+```tsx
+// Route Handler 내부에서
+const cookies = request.cookies; // 비어있음
+
+// 이유: 브라우저가 localhost 페이지를 요청할 때
+// unibusk.site 쿠키는 전송되지 않음
+```
+
+---
+
+### 4.2 Cloudflare Tunnel
+
+**시도한 방법**:
+
+```bash
+cloudflared tunnel --url <http://localhost:3000>
+```
+
+**실패 이유**:
+
+- 도메인은 BE에서 Cloudflare에서 배포한 기본 도메인을 CDN으로 설정함
+- Cloudflare가 생성한 기본 도메인은 Cloudflare Zone 접근 불가
+
+---
+
+### 4.3 IP 주소 기반 쿠키 설정
+
+**시도한 방법**:
+백엔드를 AWS EC2 IP 주소(`13.124.xxx.xxx`)로 배포하고, BE 설정에서 쿠키 도메인을 IP로 설정
+
+```yaml
+# Backend application.yml
+cors:
+  allowed-origins:
+    - <http://localhost:3000>
+
+cookie:
+  domain: localhost
+  secure: false
+  sameSite: Lax
+```
+
+<br />
+
+```tsx
+// FE: localhost:3000
+fetch("http://13.124.xxx.xxx:8080/api/members/me", {
+  credentials: "include",
+});
+```
+
+**실패 이유**:
+
+1. **Public Suffix List 규칙 위반**:
+
+```
+브라우저의 Public Suffix List (PSL):
+- 쿠키는 "유효한 도메인"에만 설정 가능
+- IP 주소는 PSL에서 유효한 도메인으로 인정되지 않음
+- 따라서 Set-Cookie 헤더를 브라우저가 무시
+
+예시:
+✅ Domain=.example.com → 유효한 eTLD+1
+✅ Domain=.unibusk.site → 유효한 eTLD+1
+❌ Domain=13.124.xxx.xxx → 유효하지 않음 (IP 주소)
+❌ Domain=localhost → 유효하지 않음 (Public Suffix)
+```
+
+> Public Suffix List (PSL)란?
+>
+> Mozilla가 관리하는 "쿠키 공유가 허용되는 도메인 목록"입니다.
+> `.com`, `.co.kr` 같은 최상위 도메인과 `.github.io`, `.cloudfront.net` 같은 공용 서브도메인을 정의하여, 악의적인 사이트가 다른 사이트의 쿠키를 탈취하는 것을 방지합니다.
+>
+> IP 주소와 `localhost`는 PSL에 포함되지 않아 쿠키 도메인으로 사용할 수 없습니다.
+
+**Cross-Origin 쿠키 차단:**
+
+```
+요청 출처: <http://localhost:3000>
+쿠키 도메인: 13.124.xxx.xxx
+
+→ 브라우저는 이 두 주소를 완전히 다른 출처로 인식
+→ localhost와 IP 주소는 "Same-Site" 관계가 아님
+```
+
+---
+
+### 4.4 Middleware
+
+**시도한 방법**:
+
+```tsx
+// middleware.ts
+export function middleware(request: NextRequest) {
+  const token = request.cookies.get("accessToken"); // undefined
+  // ...
+}
+```
+
+**실패 이유**:
+
+- `request.cookies`는 현재 도메인(localhost)의 쿠키만 포함
+- 브라우저가 Next.js 서버로 요청할 때 unibusk.site 쿠키는 전송되지 않음
+- localhost 저장소가 비어있어 어떤 방법으로도 쿠키를 읽을 수 없음
+
+---
+
+### 실패 사례 요약
+
+| 방법              | 시도 내용                   | 실패 원인                              |
+| ----------------- | --------------------------- | -------------------------------------- |
+| Route Handler     | Next.js 서버에서 쿠키 전달  | 리다이렉트 시점에 Next.js 서버 경유 ❌ |
+| Cloudflare Tunnel | 로컬을 외부 도메인으로 노출 | Zone 접근 권한 부족                    |
+| IP 기반 쿠키      | BE IP로 개발 서버 배포      | Public Suffix List 규칙 위반           |
+| Middleware        | 인증 토큰 쿠키 읽기 시도    | localhost 저장소에 쿠키 없음           |
+
+---
+
+## 5. 검증된 해결 방법
+
+브라우저의 Cookie Domain Scope 정책을 만족시키려면 Set-Cookie 응답이 FE와 **동일한 출처**에서 와야 합니다.
+
+### Next.js Proxy + Authorization Code 교환
+
+**개요**: BE가 임시 코드만 전달하고, FE가 Next.js 프록시를 통해 토큰을 교환받아 쿠키가 `localhost` 도메인에 저장되도록 처리합니다.
+
+**핵심 아이디어**:
+
+```
+기존 방식 (실패):
+BE → Set-Cookie + Redirect → FE (localhost)
+❌ 브라우저가 도메인 불일치로 쿠키 차단
+```
+
+<br />
+
+```bash
+Proxy 방식 (성공):
+Step 1: BE → 임시 코드를 query string으로 FE 콜백 URL로 Redirect
+        Location: http://localhost:3000/oauth-callback/kakao?code=temp_abc123
+        (Set-Cookie 없음)
+
+Step 2: FE 콜백 페이지 렌더링
+        → useEffect에서 searchParams.get('code')로 임시 코드 추출
+
+Step 3: FE → Next.js 프록시로 POST 요청
+        fetch('/api/auth/token/exchange', {
+          method: 'POST',
+          body: JSON.stringify({ code: 'temp_abc123' })
+        })
+        → 브라우저는 "localhost:3000/api/... 요청"으로 인식
+
+Step 4: Next.js Rewrites → 실제 BE로 프록시
+        POST https://unibusk.site/api/auth/token/exchange
+        (브라우저는 이 과정을 모름)
+
+Step 5: BE → 임시 코드 검증 후 Set-Cookie 응답
+        200 OK
+        Set-Cookie: accessToken=xxx; HttpOnly; Path=/; (Domain 없음)
+        Set-Cookie: refreshToken=yyy; HttpOnly; Path=/; (Domain 없음)
+
+Step 6: Next.js → 응답을 브라우저에 그대로 전달
+
+Step 7: 브라우저 → "localhost:3000/api/... 요청의 응답"으로 인식
+        ✅ Domain이 없는 Set-Cookie를 현재 출처(localhost)의 쿠키로 저장
+```
+
+**왜 프록시가 필요한가?:**
+
+```bash
+프록시 없이 직접 호출 시 (실패):
+FE: fetch('https://unibusk.site/api/auth/token/exchange')
+→ Cross-Origin 요청
+→ BE가 Set-Cookie 응답 (Domain 없음)
+→ 브라우저: "unibusk.site에서 온 응답이구나"
+❌ unibusk.site 저장소에 저장 (localhost에서 접근 불가)
+```
+
+프록시 사용 시 (성공):
+
+```bash
+FE: fetch('/api/auth/token/exchange')
+→ 브라우저는 "localhost:3000/api/... 요청"으로 인식
+→ Next.js가 내부적으로 unibusk.site로 프록시
+→ BE가 Set-Cookie 응답 (Domain 없음)
+→ Next.js가 응답을 그대로 전달
+→ 브라우저: "localhost:3000에서 온 응답이구나"
+✅ Domain이 없으므로 요청 출처인 localhost에 저장
+```
+
+---
+
+## 참고 자료
+
+- [MDN — HTTP 쿠키 (Set-Cookie, Domain, SameSite)](https://developer.mozilla.org/ko/docs/Web/HTTP/Cookies)
+- [MDN — Set-Cookie](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie)
+- [Public Suffix List](https://publicsuffix.org/)
+- [Next.js — Rewrites](https://nextjs.org/docs/app/api-reference/config/next-config-js/rewrites)
+- [RFC 6749 — OAuth 2.0 Authorization Framework](https://datatracker.ietf.org/doc/html/rfc6749)
