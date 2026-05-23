@@ -322,6 +322,11 @@ h3 {
   margin: 1.15em 0;
 }
 
+.prose img {
+  max-width: 100%;
+  height: auto;
+}
+
 .prose table {
   display: block;
   width: 100%;
