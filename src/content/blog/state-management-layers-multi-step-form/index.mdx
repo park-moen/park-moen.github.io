@@ -1,0 +1,344 @@
+---
+title: "멀티 스텝 폼의 상태 관리 계층 분리: React Hook Form + Zustand + TanStack Query"
+description: "공연 등록 폼을 구현하며 마주친 '어디에 어떤 상태를 두어야 하는가'라는 질문에, 각 라이브러리의 책임 범위를 명확히 정의해 해결한 과정을 공유합니다."
+pubDate: 2026-02-15T00:00:00+09:00
+slug: "2026/02/15/state-management-layers-multi-step-form"
+tags: ["React", "React Hook Form", "Zustand", "TanStack Query", "TypeScript"]
+draft: false
+---
+
+## 왜 상태 관리 계층을 분리해야 하는가
+
+UNIBUSK 프로젝트의 공연 등록 기능은 4단계로 구성된 멀티 스텝 폼입니다.
+
+| 스텝   | 입력 내용                                      |
+| ------ | ---------------------------------------------- |
+| Step 1 | 공연자 정보 (팀명, 연락처, 이메일, 인스타그램) |
+| Step 2 | 공연 기본 정보 (공연명, 장소, 날짜, 시간)      |
+| Step 3 | 공연 상세 정보 (포스터, 상세 소개)             |
+| Step 4 | 체크리스트 확인                                |
+
+이 폼을 구현할 때 아래 세 가지 상태가 동시에 존재합니다.
+
+1. **폼 필드 입력값** — 현재 스텝에서 유저가 타이핑하는 데이터
+2. **스텝 간 공유 데이터** — 이전 스텝에서 입력한 값, 현재 스텝 번호
+3. **서버 상태** — API 요청/응답, 캐시, 뮤테이션 상태
+
+이 세 가지를 하나의 전역 스토어로 관리하면 책임이 뒤섞여 유지보수가 어려워집니다. 각 계층의 역할을 명확히 나누면 책임이 분리되어, 하나의 변경이 다른 계층에 미치는 영향을 최소화할 수 있습니다.
+
+---
+
+## 아키텍처 개요
+
+```
+[유저 입력]
+     ↓
+react-hook-form  ← 필드 단위 입력값, 유효성 검사, 에러 메시지
+     ↓ (스텝 이동 시 snapshot 저장)
+Zustand          ← 현재 스텝 번호, 스텝 간 공유 formData
+     ↓ (최종 제출 시)
+TanStack Query   ← API 뮤테이션, 서버 캐시 무효화
+     ↓
+Zod Schema       ← 프론트 폼 스키마 / 백엔드 DTO 스키마 이중 검증
+```
+
+---
+
+## Layer 1: React Hook Form — 필드 입력과 유효성 검사
+
+### FormProvider로 컨텍스트 공유
+
+`register-modal.tsx`에서 `useForm`을 초기화하고 `FormProvider`로 하위 스텝 컴포넌트에 컨텍스트를 주입합니다.
+
+```tsx
+// src/components/performance/register-modal.tsx
+export function RegisterModal({ isOpen, onClose }: RegistrationModalProps) {
+  const methods = useForm<PerformanceRegisterForm>({
+    resolver: zodResolver(PerformanceRegisterFormSchema),
+    mode: "onSubmit",
+    reValidateMode: "onSubmit",
+    defaultValues: { ...formData, checklist: formData.checklist ?? [] },
+  });
+
+  return (
+    <FormProvider {...methods}>
+      <section className="flex h-full flex-col">
+        <StepContent step={step} />
+      </section>
+    </FormProvider>
+  );
+}
+```
+
+### Zustand가 있는데 FormProvider가 왜 필요한가
+
+Zustand의 `formData`는 **스냅샷**입니다. 스텝 이동 시 `setFormData(getValues())`를 호출하는 시점에만 업데이트됩니다. 유저가 타이핑하는 순간의 값은 Zustand store에 존재하지 않습니다.
+
+FormProvider가 제공하는 것은 데이터가 아니라 **기능**입니다.
+
+| react-hook-form        | Zustand로 대체하면                     |
+| ---------------------- | -------------------------------------- |
+| `formState.errors`     | 에러 상태 직접 관리                    |
+| `trigger(fields)`      | 스텝별 부분 검증 직접 구현             |
+| `handleSubmit`         | 전체 검증 후 제출 직접 구현            |
+| 비제어 컴포넌트 최적화 | 타이핑마다 전역 상태 업데이트 → 리렌더 |
+
+마지막 항목이 핵심입니다. react-hook-form은 기본적으로 `ref`로 DOM을 직접 참조하는 **비제어 컴포넌트** 방식으로 동작합니다. Zustand에 실시간 필드 값을 저장하면 타이핑할 때마다 스토어를 구독하는 모든 컴포넌트가 리렌더됩니다.
+
+```
+Zustand.formData  = 체크포인트 저장 (스텝 이동/모달 닫기 시점)
+react-hook-form   = 실시간 동작 엔진 (검증, 에러, 렌더링 최적화)
+FormProvider      = 그 엔진을 하위 컴포넌트에서 꺼내 쓸 수 있는 컨텍스트
+```
+
+### useFormContext로 각 스텝이 독립적으로 구독
+
+각 스텝 컴포넌트는 `useFormContext`를 통해 상위 `useForm` 인스턴스를 공유합니다. props로 상태를 전달할 필요가 없습니다.
+
+```tsx
+// src/components/performance/steps/step-01.tsx
+export function Step01() {
+  const {
+    register,
+    control,
+    formState: { errors },
+  } = useFormContext<PerformanceRegisterForm>();
+  // ...
+}
+```
+
+`useFormContext<PerformanceRegisterForm>()`에 타입 인수를 명시함으로써 `errors.teamName`, `register('teamName')` 등 모든 접근이 안전한 타입으로 추론됩니다.
+
+### 스텝별 부분 유효성 검사
+
+"다음" 버튼을 누를 때 현재 스텝의 필드만 검증합니다. `trigger(fields)`에 현재 스텝에 해당하는 필드 이름 배열을 전달합니다.
+
+```ts
+// src/constants/performance/register.ts
+export const STEP_FIELDS: Record<1 | 2 | 3 | 4, (keyof PerformanceRegisterForm)[]> = {
+  1: ["teamName", "contactNumber", "email", "instagramUrl"],
+  2: ["performanceName", "performanceLocation", "performanceDate", "performanceDescription", "startTime", "endTime"],
+  3: ["posterImage", "performanceDetail"],
+  4: ["checklist"],
+};
+```
+
+```ts
+// src/components/performance/register-modal.tsx
+async function nextStep() {
+  const fields = STEP_FIELDS[step as 1 | 2 | 3 | 4] || [];
+  const isValid = await trigger(fields);
+  if (isValid) {
+    setFormData(getValues()); // Zustand에 스냅샷 저장
+    setStep(Math.min(step + 1, 4));
+  }
+}
+```
+
+`STEP_FIELDS`의 값 타입이 `(keyof PerformanceRegisterForm)[]`이므로, 스키마에 없는 필드명을 실수로 넣으면 컴파일 에러로 잡힙니다.
+
+---
+
+## Layer 2: Zustand — 스텝 간 공유 상태
+
+### 스토어 설계
+
+Zustand 스토어는 두 가지만 책임집니다. 현재 스텝 번호(`step`)와 스텝 이동 시 저장되는 폼 데이터 스냅샷(`formData`)입니다.
+
+```ts
+// src/stores/performance/register.store.ts
+interface PerformanceRegisterState {
+  step: number;
+  formData: Partial<PerformanceRegisterForm>;
+  setStep: (step: number) => void;
+  setFormData: (data: Partial<PerformanceRegisterForm>) => void;
+  reset: () => void;
+}
+
+export const useRegisterStore = create<PerformanceRegisterState>((set) => ({
+  ...initialState,
+  setStep: (step) => set({ step }),
+  setFormData: (data) => set((state) => ({ formData: { ...state.formData, ...data } })),
+  reset: () => set(initialState),
+}));
+```
+
+`formData`의 타입이 `Partial<PerformanceRegisterForm>`인 이유는 스텝 이동 중에는 전체 필드가 채워지지 않을 수 있기 때문입니다. 최종 제출 시에는 react-hook-form의 `handleSubmit`이 전체 유효성 검사를 통과한 완전한 `PerformanceRegisterForm` 타입을 보장합니다.
+
+### 모달 재오픈 시 데이터 복원
+
+모달을 닫았다가 다시 열 때, Zustand에 저장된 `formData`를 react-hook-form에 복원합니다. `useEffect`의 의존성 배열과 ref를 조합해 "닫혀 있다가 열리는 순간"에만 동기화가 실행되도록 했습니다.
+
+```tsx
+// src/components/performance/register-modal.tsx
+const prevIsOpenRef = React.useRef(isOpen);
+
+React.useEffect(() => {
+  if (!prevIsOpenRef.current && isOpen) {
+    reset(formData); // Zustand → react-hook-form 동기화
+  }
+  prevIsOpenRef.current = isOpen;
+}, [isOpen, formData, reset]);
+```
+
+> **📌 참고** `isOpen`이 `true`일 때마다 실행하면 폼 입력 중에도 리셋이 발생합니다. `prevIsOpenRef`로 이전 상태를 추적해 "열리는 시점"에만 동기화합니다.
+
+### 모달 닫기 시 데이터 유지
+
+"X" 버튼으로 모달을 닫아도 입력값이 사라지지 않도록, `onClose` 전에 `setFormData(getValues())`를 호출해 현재 react-hook-form 값을 Zustand에 저장합니다.
+
+---
+
+## Layer 3: TanStack Query + Zod — API 통신과 서버 캐시
+
+### 두 개의 Zod 스키마
+
+프론트엔드 폼과 백엔드 API의 데이터 구조는 다릅니다. 이를 명시적으로 분리하기 위해 스키마를 두 개로 유지합니다.
+
+```ts
+// src/apis/performance/performance.schema.ts
+
+// 프론트엔드 입력용 스키마
+export const PerformanceRegisterFormSchema = z
+  .object({
+    teamName: z.string().min(1, PERFORMANCE_ERROR_MESSAGE),
+    performanceDate: z.date().refine((date) => date >= today, "과거 날짜는 선택할 수 없습니다."),
+    startTime: z.string().min(1, PERFORMANCE_ERROR_MESSAGE),
+    // ...
+  })
+  .superRefine(validatePerformanceForm);
+
+// 백엔드 전송용 DTO 스키마
+export const PerformanceCreateRequestDtoSchema = z.object({
+  performanceLocationId: z.number(),
+  startTime: z.iso.datetime(), // ISO 8601
+  performanceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  // ...
+});
+
+export type PerformanceRegisterForm = z.infer<typeof PerformanceRegisterFormSchema>;
+export type PerformanceCreateRequestDto = z.infer<typeof PerformanceCreateRequestDtoSchema>;
+```
+
+`PerformanceRegisterForm`은 유저 친화적 타입(`Date`, `string` HH:mm 포맷)을, `PerformanceCreateRequestDto`는 백엔드 친화적 타입(ISO 8601 datetime 문자열)을 표현합니다.
+
+### Transformer로 계층 간 결합 제거
+
+변환 로직을 API 통신 계층에 위임함으로써, UI 계층은 데이터 변환이라는 비즈니스 로직으로부터 격리됩니다.
+
+```ts
+// src/apis/performance/performance.lib.ts
+export function transformPerformanceFormToApiRequest(formData: PerformanceRegisterForm): PerformanceCreateRequestDto {
+  const combineDateAndTime = (date: Date, time: string) => {
+    const [hours, minutes] = time.split(":").map(Number);
+    const result = new Date(date);
+    result.setHours(hours, minutes, 0, 0);
+    return format(result, "yyyy-MM-dd'T'HH:mm:ss"); // KST 유지
+  };
+
+  return {
+    performanceLocationId: formData.performanceLocation.id,
+    performers: [{ name: formData.teamName, email: formData.email, phoneNumber: formData.contactNumber }],
+    startTime: combineDateAndTime(formData.performanceDate, formData.startTime),
+    endTime: combineDateAndTime(formData.performanceDate, formData.endTime),
+    performanceDate: format(formData.performanceDate, "yyyy-MM-dd"),
+    // ...
+  };
+}
+```
+
+### useMutation으로 서버 상태 관리
+
+```ts
+// src/hooks/performance/use-create-performance.ts
+export function useCreatePerformance() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (formData: PerformanceRegisterForm) => {
+      const apiRequestData = transformPerformanceFormToApiRequest(formData);
+      return createPerformance(apiRequestData);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: performanceKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: performanceKeys.myPerformances() });
+    },
+  });
+}
+```
+
+`mutationFn`의 입력 타입은 `PerformanceRegisterForm`이므로 react-hook-form의 `handleSubmit` 결과물을 그대로 전달할 수 있습니다. 등록 성공 시 `invalidateQueries`로 공연 목록 캐시를 무효화하면 UI는 자동으로 최신 데이터를 반영합니다.
+
+### API 응답의 런타임 검증
+
+응답도 Zod로 검증합니다. ISO 8601 시간 문자열을 `HH:mm` 포맷으로 변환하는 `transform`을 스키마 레벨에 정의해, 컴포넌트는 변환된 타입만 받습니다.
+
+```ts
+export const transformerISOToHHmmSchema = z.string().transform((date, ctx) => {
+  const parts = date.split("T");
+  if (parts.length < 2) {
+    ctx.addIssue({ code: "custom", message: "Invalid date format" });
+    return z.NEVER;
+  }
+  return parts[1].substring(0, 5); // "2025-06-01T14:30:00" → "14:30"
+});
+```
+
+---
+
+## 세 계층이 협력하는 전체 흐름
+
+```
+1. 모달 열기    → Zustand.formData → react-hook-form.reset() 동기화
+2. 스텝 입력   → react-hook-form이 필드 상태 관리 (에러: formState.errors)
+3. "다음" 클릭 → trigger(STEP_FIELDS[step]) → getValues() → Zustand.setFormData() → setStep()
+4. "이전" 클릭 → getValues() → Zustand.setFormData() → setStep()
+5. 모달 닫기   → getValues() → Zustand.setFormData() / 재오픈 시 복원
+6. 최종 제출   → handleSubmit() → mutate(data) → transformToDto → invalidateQueries → reset()
+```
+
+---
+
+## 핵심 설계 원칙 정리
+
+### 단방향 데이터 흐름 / 타입 경계 강제
+
+데이터는 스텝 이동 시 react-hook-form → Zustand 방향으로만 흐릅니다. 역방향(Zustand → react-hook-form)은 모달이 열리는 시점에만 발생해 순환 참조를 방지합니다.
+
+타입은 두 계층 경계를 명시적으로 구분합니다. `PerformanceRegisterForm`은 유저 입력 계층(react-hook-form ↔ Zustand), `PerformanceCreateRequestDto`는 API 통신 계층(TanStack Query → 서버)의 타입입니다. 변환은 `transformPerformanceFormToApiRequest` 한 곳에만 존재하므로, 백엔드 스펙이 바뀌어도 `performance.lib.ts`와 `performance.schema.ts`만 수정하면 됩니다.
+
+### 라이브러리별 역할 분담
+
+| 라이브러리      | 맡은 역할                                         |
+| --------------- | ------------------------------------------------- |
+| react-hook-form | 필드 렌더링 최적화, 에러 메시지, 부분 유효성 검사 |
+| Zustand         | 스텝 간 데이터 유지, 모달 재오픈 복원             |
+| TanStack Query  | 서버 뮤테이션, 캐시 무효화                        |
+| Zod             | 프론트 폼 검증 스키마 + 백엔드 응답 파싱          |
+
+---
+
+## 마치며
+
+공연 등록 폼을 설계할 때, 폼 안에 성격이 다른 세 가지 상태가 공존한다는 점을 먼저 파악했습니다. 필드 입력값은 타이핑마다 변하고, 스텝 간 공유 데이터는 스텝 이동 시점에만 갱신되며, 서버 상태는 API 응답에 의해 관리됩니다. 생명주기와 업데이트 빈도가 다른 상태를 하나의 저장소로 통합하면 책임이 뒤섞인다고 판단해, 계층을 분리하는 방향으로 설계를 진행했습니다.
+
+각 계층의 관심사를 분리하면, 하나의 변경이 다른 계층에 미치는 영향을 최소화할 수 있습니다. react-hook-form은 렌더링을, Zustand는 영속성을, TanStack Query는 서버 동기화를 각자의 책임 영역에서 전담합니다.
+
+---
+
+## 참고 자료
+
+**React Hook Form**
+
+- [useForm API Reference](https://react-hook-form.com/docs/useform)
+- [FormProvider & useFormContext](https://react-hook-form.com/docs/formprovider)
+- [useForm — trigger](https://react-hook-form.com/docs/useform/trigger)
+
+**TanStack Query**
+
+- [Mutations 가이드](https://tanstack.com/query/latest/docs/framework/react/guides/mutations)
+- [Query Invalidation](https://tanstack.com/query/latest/docs/framework/react/guides/query-invalidation)
+
+**Zod**
+
+- [Zod — superRefine (교차 필드 검증)](https://zod.dev/api?id=superrefine)
