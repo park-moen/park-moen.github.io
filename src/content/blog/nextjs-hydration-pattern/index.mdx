@@ -1,0 +1,282 @@
+---
+title: "Next.js App Router Hydration Pattern 적용 경험"
+description: "Next.js App Router에서 'use client'를 leaf 컴포넌트로 한정하고 TanStack Query Hydration Pattern으로 서버 prefetch를 구현해 클라이언트 API waterfall을 제거한 과정을 기록합니다."
+pubDate: 2026-02-28T00:00:00+09:00
+slug: "2026/02/28/nextjs-hydration-pattern"
+tags: ["Next.js", "TanStack Query", "Performance", "SEO"]
+draft: false
+---
+
+import { Image } from "astro:assets";
+import beforeListNetwork from "./before-list-network.png";
+import beforeDetailNetwork from "./before-detail-network.png";
+import afterNetwork from "./after-network.png";
+
+> App Router에서 `'use client'`를 남용하면 서버 컴포넌트의 이점을 스스로 포기하는 것과 같습니다. 이 글은 hydration 범위를 leaf 수준으로 좁히고 서버 prefetch로 클라이언트 waterfall을 제거한 과정을 기록합니다. 비용이 사라지는 것이 아니라 **TTFB로 이동**한다는 트레이드오프도 솔직하게 다룹니다.
+
+---
+
+## 문제 정의
+
+### 기존 CSR 중심 접근의 한계
+
+App Router 도입 초기에는 다음과 같은 안티패턴에 빠지기 쉽습니다.
+
+- 페이지 루트에 `'use client'` 선언 → 트리 전체가 Client Component로 변환
+- 페이지 진입 후 `useQuery`가 클라이언트에서 호출되어 **요청-응답 waterfall** 발생
+- 초기 HTML에는 스켈레톤만 존재 → SEO 크롤러가 실제 데이터를 인식하지 못함
+- 인터랙션이 필요 없는 정적 영역까지 JS 번들에 포함되어 hydration 비용 증가
+
+### 목표
+
+1. **Hydration 범위 최소화** — `'use client'`를 정말 필요한 leaf 컴포넌트에만 한정합니다.
+2. **데이터 waterfall 제거** — 서버에서 prefetch한 데이터를 클라이언트 캐시에 주입합니다.
+3. **SEO 개선** — 서버 HTML에 실제 데이터가 포함된 상태로 응답합니다.
+4. **체감 로딩 속도 개선** — 스켈레톤 깜빡임 없이 첫 화면부터 콘텐츠를 표시합니다.
+
+---
+
+## 적용한 패턴
+
+### 1. 공연 상세 페이지 — `cache()`로 중복 fetch 제거 + setQueryData 주입
+
+`src/app/(main)/performance-detail/[performanceId]/page.tsx`
+
+상세 페이지는 동일한 데이터를 **세 곳**에서 필요로 합니다.
+
+| 사용처                | 용도                         |
+| --------------------- | ---------------------------- |
+| `generateMetadata`    | OG 태그, 페이지 타이틀, 설명 |
+| 페이지 본문           | JSON-LD 구조화 데이터 생성   |
+| 클라이언트 `useQuery` | 상세 정보 렌더링             |
+
+이를 순진하게 구현하면 동일 API를 두 번 이상 호출하게 됩니다. React의 `cache()`로 요청 단위 메모이제이션을 적용해 **API 호출을 1회로 압축**했습니다.
+
+```ts
+const getPerformanceDetail = cache(async (performanceId: number) => {
+  const queryClient = getQueryClient();
+  return queryClient.fetchQuery(performanceDetailQueryOptions(performanceId));
+});
+
+export async function generateMetadata({ params }): Promise<Metadata> {
+  const performanceDetail = await getPerformanceDetail(performanceId);
+  return createPageMetadata({
+    title: performanceDetail.title,
+    description: `${performanceDetail.title} 공연의 일정, 장소, 상세 정보를 확인해보세요.`,
+    path: `/performance-detail/${performanceId}`,
+    image: performanceDetail.images[0],
+  });
+}
+
+export default async function PerformanceDetailPage({ params }) {
+  const performanceDetail = await getPerformanceDetail(performanceId);
+  const eventJsonLd = buildPerformanceEventJsonLd(performanceId, performanceDetail);
+  const breadcrumbJsonLd = buildPerformanceBreadcrumbJsonLd(performanceId, performanceDetail.title);
+
+  const queryClient = getQueryClient();
+  queryClient.setQueryData(
+    performanceDetailQueryOptions(performanceId).queryKey,
+    performanceDetail,
+  );
+
+  return (
+    <main className="flex flex-1 flex-col">
+      <JsonLdScript id="performance-event-json-ld" data={eventJsonLd} />
+      <JsonLdScript id="performance-breadcrumb-json-ld" data={breadcrumbJsonLd} />
+      <HydrationBoundary state={dehydrate(queryClient)}>
+        <Suspense fallback={<div>Loading...</div>}>
+          <PerformanceInfo performanceId={performanceId} />
+        </Suspense>
+      </HydrationBoundary>
+    </main>
+  );
+}
+```
+
+> **📌 핵심 선택**
+> 일반적으로는 `await queryClient.prefetchQuery(...)`를 사용하지만, 본 페이지는 이미 `cache()`로 fetch한 결과를 보유하고 있으므로 `setQueryData`로 캐시에 직접 주입해 **추가 네트워크 호출을 차단**했습니다.
+
+### 2. 공연 목록 페이지 — Infinite Query Prefetch + 서버측 파라미터 검증
+
+`src/app/(main)/performance-list/page.tsx`
+
+목록 페이지는 무한 스크롤 구조이므로 `prefetchInfiniteQuery`로 **첫 페이지만** 서버에서 가져온 뒤, 사용자가 스크롤할 때 후속 페이지를 클라이언트에서 이어 받도록 구성했습니다.
+
+```ts
+export default async function PerformanceListPage({ searchParams }: PageProps) {
+  const queryClient = getQueryClient();
+  const { tab: rawTab } = await searchParams;
+  const tab = isValidPerformanceTab(rawTab ?? null) ? rawTab! : 'upcoming';
+
+  await queryClient.prefetchInfiniteQuery(performanceListInfiniteQueryOptions(tab));
+
+  return (
+    <div className="relative container-1920 flex min-h-screen flex-col">
+      <main className="min-h-screen bg-white pt-[57px]">
+        <Hero />
+        <HydrationBoundary state={dehydrate(queryClient)}>
+          <Suspense fallback={<div>로딩 중...</div>}>
+            <PerformanceTabs defaultTab={tab} />
+          </Suspense>
+        </HydrationBoundary>
+      </main>
+    </div>
+  );
+}
+```
+
+이 페이지의 포인트는 다음과 같습니다.
+
+1. **URL 쿼리 검증을 서버에서 수행** — `isValidPerformanceTab`으로 잘못된 값을 차단하고, 항상 유효한 탭에 대응하는 데이터를 prefetch합니다.
+2. **Hero 영역은 Server Component로 유지** — `'use client'` 없이 정적 HTML로 응답하여 JS 번들에서 제외했습니다.
+3. **인터랙션이 필요한 `PerformanceTabs`만 Client Component** — hydration 비용이 leaf 수준으로 한정됩니다.
+
+### 3. 프로필 페이지 — 인증 페이지에 적용할 때 반드시 알아야 할 것
+
+`src/app/(main)/profile/page.tsx`
+
+프로필 페이지는 로그인한 사용자만 접근 가능하고 SEO와 무관합니다. 뒤에서 다룰 적용 기준의 ❌ 부적합에 해당하므로, 원칙적으로는 적용할 필요가 없습니다.
+
+그럼에도 인증 페이지에 서버 prefetch를 적용한다면, `cache: 'no-store'` 누락은 **타 사용자 데이터 노출**로 이어질 수 있어 반드시 명시해야 합니다.
+
+```ts
+export default async function ProfilePage() {
+  const cookieStore = await cookies();
+  const queryClient = getQueryClient();
+
+  await queryClient.prefetchQuery({
+    ...userQueryOptions,
+    queryFn: async () => await getUser({
+      headers: {
+        Cookie: cookieStore.toString(),
+      },
+      cache: 'no-store', // 개인화 데이터 → 반드시 명시
+    }),
+  });
+
+  return (
+    <main className="flex flex-1 flex-col">
+      <HydrationBoundary state={dehydrate(queryClient)}>
+        <ProfileTab />
+      </HydrationBoundary>
+    </main>
+  );
+}
+```
+
+> **⚠️ `cache: 'no-store'` 누락 시 데이터 누출**
+> Next.js의 fetch 캐시는 기본적으로 동일 URL 요청을 캐싱합니다. 개인화 데이터에 이 옵션을 명시하지 않으면 A 사용자의 응답이 캐시되어 B 사용자에게 그대로 반환될 수 있습니다.
+
+SEO 이점도 없고 이 위험까지 감수해야 하는 인증 페이지에는 **적용하지 않는 것을 권장합니다.** 초기 로딩 스피너를 제거하고 싶다면 서버 prefetch보다 스켈레톤 UI를 개선하는 쪽이 더 적절합니다.
+
+---
+
+## 패턴 비교
+
+### 적용 전 (CSR Waterfall)
+
+```
+1. 서버: 스켈레톤 HTML 응답
+2. 클라이언트: JS 다운로드 → hydration
+3. 클라이언트: useQuery 호출 → API 요청
+4. 응답 수신 → 콘텐츠로 교체
+```
+
+- 사용자: **스켈레톤 깜빡임** 경험
+- SEO 크롤러: **빈 HTML** 인식
+
+### 적용 후 (Server Prefetch + Hydration)
+
+```
+1. 서버: 데이터 fetch → 실제 데이터가 포함된 HTML 응답
+2. 클라이언트: hydration 시 캐시 복원
+3. useQuery 호출 → 캐시 hit → 즉시 데이터 반환
+```
+
+- 사용자: **첫 화면부터 콘텐츠** 표시
+- SEO 크롤러: **실제 데이터가 포함된 HTML** 인식
+
+---
+
+## 트레이드오프
+
+Hydration Pattern은 **공짜가 아닙니다.** 적용 전후의 비용 구조가 바뀌는 것이지, 총 소요 시간이 줄어드는 것은 아닙니다.
+
+### TTFB 증가
+
+서버가 API 응답을 기다린 뒤에야 HTML을 응답하므로, **TTFB(Time To First Byte)는 필연적으로 증가**합니다.
+
+```
+Before (CSR):
+브라우저 → 서버 → 빈 HTML 즉시 응답
+                       ↓
+             JS 로드 → API 요청 (2.07s 대기)
+
+After (Hydration):
+브라우저 → 서버가 API 호출 (2.07s 대기)
+                       ↓
+             데이터 포함 HTML 응답
+```
+
+총 소요 시간만 보면 두 방식은 비슷하거나, 오히려 CSR이 짧을 수 있습니다.
+
+### 그럼에도 적용한 이유
+
+| 항목         | CSR                  | Hydration                  |
+| ------------ | -------------------- | -------------------------- |
+| TTFB         | 빠름                 | 느림                       |
+| 첫 화면 표시 | 스피너 → 데이터 교체 | 콘텐츠 즉시 표시           |
+| 체감 속도    | 느림                 | 빠름                       |
+| SEO 크롤러   | 빈 HTML 인식         | 실제 데이터 포함 HTML 인식 |
+
+핵심은 **"빠른 응답"이 아니라 "즉각적인 콘텐츠 표시"와 SEO**입니다. 사용자는 스피너가 사라지고 데이터가 채워지는 순간이 아니라, **페이지가 열리는 순간 콘텐츠가 보이는 경험**을 체감합니다.
+
+### 적용 기준
+
+- ✅ **적합** — 공연 상세, 목록 페이지처럼 SEO가 중요하고 초기 데이터가 즉시 필요한 페이지
+- ❌ **부적합** — 인증 후에만 접근 가능하고 SEO와 무관한 페이지 (대시보드, 마이페이지 등)
+
+---
+
+## 측정 결과
+
+### 클라이언트 API waterfall 제거
+
+3G 환경에서 Hydration Pattern 적용 전/후 각 페이지의 Network 탭을 비교했습니다. CSR 상태에서는 JS 로드 + hydration 완료 후 클라이언트가 API를 직접 호출하며, 네트워크 환경에서 **2초 이상의 대기**가 발생합니다.
+
+#### Before (CSR) — 세 페이지에서 공통으로 발생
+
+**공연 목록 페이지** (`/performance-list`) — `past?page=0` API 요청, Waiting for server response **2.08s**
+
+<Image src={beforeListNetwork} width={720} alt="Before — 공연 목록 Network + Timing" />
+
+**공연 상세 페이지** (`/performance-detail/[id]`) — `171` API 요청, Waiting for server response **2.06s**
+
+<Image src={beforeDetailNetwork} width={720} alt="Before — 공연 상세 Network + Timing" />
+
+두 페이지 모두 클라이언트 hydration 이후 API 요청이 발생하는 waterfall 구조가 확인됩니다.
+
+#### After (Hydration) — 공연 목록·상세 페이지, 클라이언트 API 요청 없음
+
+<Image src={afterNetwork} width={720} alt="After — 공연 목록 Network 탭 (클라이언트 API 요청 사라짐)" />
+
+공연 목록·상세 페이지는 서버 prefetch 후 클라이언트 Network 탭에서 동일 요청이 **나타나지 않습니다**. 사용자는 페이지 진입 즉시 콘텐츠를 보게 됩니다.
+
+프로필 페이지는 앞서 설명한 이유로 적용을 권장하지 않아 After 비교에서 제외했습니다.
+
+> **📌 측정 환경의 한계**
+> localhost(서버↔API 레이턴시 ≈ 0ms)에서는 waterfall 비용 자체가 거의 0이므로 차이가 측정되지 않습니다. 위 비교는 DevTools의 `Slow 3G` 옵션으로 실 네트워크 환경을 시뮬레이션한 결과입니다.
+
+### SEO 측면 개선
+
+- 서버 HTML에 공연 제목, 일정, 장소가 그대로 포함되어 크롤러 인덱싱 가능
+- `generateMetadata`에서 동일 데이터를 활용해 OG 태그, 페이지 타이틀이 정확히 채워짐
+- JSON-LD 구조화 데이터로 검색 결과에 리치 스니펫 노출 기대
+
+---
+
+## 참고 자료
+
+- [Next.js — Data Fetching Patterns](https://nextjs.org/docs/app/building-your-application/data-fetching/patterns)
+- [TanStack Query — Advanced Server Rendering](https://tanstack.com/query/latest/docs/framework/react/guides/advanced-ssr)
+- [React — `cache` API](https://react.dev/reference/react/cache)
