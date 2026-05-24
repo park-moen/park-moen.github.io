@@ -1,8 +1,8 @@
 ---
 title: "Next.js App Router 폴더 아키텍처 마이그레이션 가이드"
 description: "역할 기반(role-based) 폴더 구조의 한계를 분석하고, Next.js App Router 환경에 맞는 Co-location + 도메인 기반 공유 레이어 구조로 점진적으로 전환하는 방법을 설명합니다."
-pubDate: 2026-05-08T00:00:00+09:00
-slug: "2026/05/08/folder-architecture-guide"
+pubDate: 2026-03-17T00:00:00+09:00
+slug: "2026/03/17/folder-architecture-guide"
 tags: ["Architecture", "Next.js", "FSD", "Co-location", "DDD"]
 draft: true
 ---

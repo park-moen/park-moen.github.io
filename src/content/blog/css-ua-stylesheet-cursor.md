@@ -1,8 +1,8 @@
 ---
 title: "CSS User-Agent Stylesheet와 cursor 상속이 끊기는 이유"
 description: "부모에 cursor-pointer를 줬는데 자식 button이나 SVG에서 적용이 안 되는 이유를 User-Agent Stylesheet와 CSS 캐스케이드·상속 우선순위로 설명합니다."
-pubDate: 2026-03-12T00:00:00+09:00
-slug: "2026/03/12/css-ua-stylesheet-cursor"
+pubDate: 2026-01-15T00:00:00+09:00
+slug: "2026/01/15/css-ua-stylesheet-cursor"
 tags: ["CSS", "cursor-pointer"]
 ---
 

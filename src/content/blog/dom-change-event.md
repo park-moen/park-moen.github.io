@@ -1,8 +1,8 @@
 ---
 title: "같은 이름, 다른 이벤트 — DOM 'change' 이벤트의 진실"
 description: "'change'는 하나의 이벤트가 아닙니다. 어떤 객체에 리스너를 붙이느냐에 따라 완전히 다른 의미를 가지며, TypeScript 타입 시스템이 이를 정확히 구분합니다."
-pubDate: 2026-05-17T00:00:00+09:00
-slug: "2026/05/17/dom-change-event"
+pubDate: 2026-03-22T00:00:00+09:00
+slug: "2026/03/22/dom-change-event"
 tags: ["DOM", "TypeScript", "Browser API", "Event"]
 draft: false
 ---

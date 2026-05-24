@@ -1,8 +1,8 @@
 ---
 title: "React useState Lazy Initializer 패턴"
 description: "useState에 초기값 대신 함수를 전달하는 Lazy Initializer 패턴의 동작 원리와 성능 이점을 실제 useMediaQuery 훅 코드를 통해 설명합니다."
-pubDate: 2026-05-17T00:00:00+09:00
-slug: "2026/05/17/lazy-initializer"
+pubDate: 2026-02-18T00:00:00+09:00
+slug: "2026/02/18/lazy-initializer"
 tags: ["React", "TypeScript", "Performance", "Hooks"]
 draft: false
 ---

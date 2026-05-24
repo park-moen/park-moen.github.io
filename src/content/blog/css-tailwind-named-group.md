@@ -1,8 +1,8 @@
 ---
 title: "Tailwind CSS Named Group — 중첩 컴포넌트에서 부모 상태 정확히 참조하기"
 description: "Tailwind의 group 유틸리티가 중첩 구조에서 모호해지는 문제를 Named Group 문법으로 해결하는 방법을 설명합니다. group/{name}과 group-data 조합을 실제 컴포넌트 설계 사례와 함께 정리합니다."
-pubDate: 2026-05-10T00:00:00+09:00
-slug: "2026/05/10/css-tailwind-named-group"
+pubDate: 2026-04-25T00:00:00+09:00
+slug: "2026/04/25/css-tailwind-named-group"
 tags: ["CSS", "Tailwind"]
 ---
 

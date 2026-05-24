@@ -1,8 +1,8 @@
 ---
 title: "CSS clamp()로 반응형 폰트 크기 한 줄에 해결하기"
 description: "미디어 쿼리 없이 뷰포트에 따라 유동적으로 변하는 폰트 크기를 clamp() 함수로 구현하는 방법과, 모바일/데스크탑 고정값에서 clamp 공식을 유도하는 과정을 설명합니다."
-pubDate: 2026-05-17T00:00:00+09:00
-slug: "2026/05/17/css-clamp-fluid-typography"
+pubDate: 2026-03-28T00:00:00+09:00
+slug: "2026/03/28/css-clamp-fluid-typography"
 tags: ["CSS", "Tailwind"]
 ---
 

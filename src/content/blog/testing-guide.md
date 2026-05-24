@@ -1,8 +1,8 @@
 ---
 title: "테스트 코드 작성 가이드"
 description: "UNIBUSK 프로젝트에서 Vitest, Playwright, Storybook을 활용한 테스트 파일 위치, 책임 분리, 작성 패턴을 정리합니다."
-pubDate: 2026-05-12T00:00:00+09:00
-slug: "2026/05/12/testing-guide"
+pubDate: 2026-04-29T00:00:00+09:00
+slug: "2026/04/29/testing-guide"
 tags: ["Testing", "Vitest", "Playwright", "Storybook"]
 draft: true
 ---
