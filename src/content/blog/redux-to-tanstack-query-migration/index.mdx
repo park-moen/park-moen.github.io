@@ -1,13 +1,13 @@
 ---
 title: "Redux Saga에서 TanStack Query로: 비표준 유틸리티 의존성 제거와 온보딩 비용 절감"
-description: "Redux Toolkit + Redux Saga + 내부 유틸리티 reduxMaker 구조는 보일러플레이트를 줄였지만 비표준 API와 제너레이터 문법으로 온보딩 러닝커브가 높았습니다. 서버 상태를 TanStack Query, 클라이언트 상태를 Zustand, 폼을 React Hook Form + Zod로 역할을 분리해 표준 생태계로 전환한 과정을 기록합니다."
+description: "Redux Toolkit + Redux Saga + 내부 유틸리티 reduxMaker 구조는 보일러플레이트를 줄였지만 비표준 API와 제너레이터 문법으로 온보딩 러닝커브가 높고 서버 상태 캐싱이 부재했습니다. 서버 상태 관리를 TanStack Query로 전환하고 reduxMaker 의존성을 제거한 과정을 기록합니다."
 pubDate: 2026-03-05T00:00:00+09:00
 slug: "2026/03/05/redux-to-tanstack-query-migration"
 tags: ["TanStack Query", "Redux", "Architecture", "Migration"]
 draft: false
 ---
 
-> Redux Toolkit + Redux Saga + 내부 유틸리티 `reduxMaker`로 구성된 레거시 상태 관리 구조는 보일러플레이트를 줄였지만, 비표준 API와 제너레이터 문법으로 인해 신규 팀원 온보딩 러닝커브가 높고 서버 상태 캐싱을 직접 관리해야 했습니다. 서버 상태·클라이언트 상태·폼 상태를 각각 TanStack Query, Zustand, React Hook Form + Zod로 분리해 표준 생태계로 전환하고 `reduxMaker` 의존성을 완전 제거한 과정을 기록합니다.
+> Redux Toolkit + Redux Saga + 내부 유틸리티 `reduxMaker`로 구성된 레거시 상태 관리 구조는 보일러플레이트를 줄였지만, 비표준 API와 제너레이터 문법으로 인해 신규 팀원 온보딩 러닝커브가 높고 서버 상태 캐싱이 부재했습니다. 이 글은 서버 상태 관리를 TanStack Query로 전환해 `reduxMaker` 의존성을 제거하고 표준 생태계로 이행한 과정을 기록합니다.
 
 ---
 
