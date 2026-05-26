@@ -1,0 +1,240 @@
+---
+title: "Squash & Merge 환경에서의 Rebase와 Force Push 가이드"
+description: "Squash & Merge 전략을 사용하는 팀에서 feature 브랜치를 최신 main과 동기화할 때 rebase와 merge 중 무엇을 선택해야 하는지, 그리고 rebase 이후 왜 --force-with-lease가 필요한지를 설명합니다."
+pubDate: 2026-01-4T00:00:00+09:00
+slug: "2026/01/04/squash-merge-rebase-guide"
+tags: ["Git", "GitHub", "Rebase"]
+draft: false
+---
+
+## Squash & Merge란?
+
+GitHub에서 PR을 병합하는 방식에는 세 가지가 있습니다.
+
+| 방식               | 설명                                                    |
+| ------------------ | ------------------------------------------------------- |
+| **Merge Commit**   | feature 브랜치의 모든 커밋 + merge commit을 main에 추가 |
+| **Squash & Merge** | feature 브랜치의 모든 커밋을 하나로 압축해 main에 추가  |
+| **Rebase & Merge** | feature 브랜치의 커밋을 main 위에 선형으로 재배치       |
+
+**Squash & Merge**를 선택하면 feature 브랜치에서 작업한 커밋이 몇 개든 main에는 **단 1개의 커밋**으로 합쳐집니다.
+
+```
+Feature 브랜치:   A → B → C  (커밋 3개)
+                              ↓ Squash & Merge
+main:                         D  (A+B+C가 하나로 압축)
+```
+
+이 전략의 장점은 main 브랜치 히스토리가 **기능 단위로 깔끔하게 유지**된다는 점입니다.
+
+---
+
+**Rebase & Merge**를 선택하면 feature 브랜치의 커밋이 **개별적으로 main 위에 재배치**됩니다. 커밋 내용은 동일하지만 부모 커밋이 바뀌므로 SHA(커밋 해시)는 새로 발급됩니다.
+
+```
+Feature 브랜치:   A → B → C  (커밋 3개)
+                              ↓ Rebase & Merge
+main:             ... → A' → B' → C'  (커밋 3개, SHA만 변경)
+```
+
+이 전략의 장점은 **커밋 단위로 작업 흐름을 추적**할 수 있다는 점입니다. 단, feature 브랜치의 커밋 품질(메시지, 단위 분리)이 main 히스토리에 그대로 반영되므로 커밋을 **의미 있는 단위로 정리해두는 습관**이 중요합니다.
+
+---
+
+## Squash & Merge vs Rebase & Merge
+
+| 항목                    | Squash & Merge                  | Rebase & Merge                 |
+| ----------------------- | ------------------------------- | ------------------------------ |
+| main에 추가되는 커밋 수 | 항상 1개                        | 브랜치 커밋 수만큼             |
+| 작업 과정 추적          | 불가 (압축됨)                   | 가능 (커밋 보존)               |
+| 커밋 품질 요구 수준     | 낮음 (WIP, fix 혼재 무관)       | 높음 (커밋이 잘 정리되어야 함) |
+| main 히스토리 간결함    | 높음                            | 낮음 (커밋이 많을수록 복잡)    |
+| 주요 사용 상황          | 빠른 개발, 커밋이 지저분한 경우 | 커밋 하나하나가 의미 있는 경우 |
+
+---
+
+## 문제 상황: feature 브랜치 동기화
+
+팀원의 PR이 main에 머지되면 내 feature 브랜치는 main보다 뒤처집니다. 이때 두 가지 선택지가 있습니다.
+
+- `git merge main` — main의 변경사항을 현재 브랜치에 merge commit으로 가져옴
+- `git rebase main` — 현재 브랜치의 커밋을 최신 main 위에 재배치
+
+---
+
+## rebase vs merge 비교
+
+### merge 방식
+
+```bash
+git merge main
+```
+
+```
+main:            A → B → C → D (squash 커밋)
+                               ↘
+feature/my-work: X → Y → Z →   M (merge commit 생성)
+```
+
+- 불필요한 **merge commit이 feature 브랜치에 누적됩니다.**
+- sync를 반복할수록 merge commit도 함께 쌓입니다.
+- 최종 PR 커밋 목록에 merge commit이 포함되어 **리뷰어가 읽기 불편합니다.**
+
+### rebase 방식
+
+```bash
+git checkout main
+git pull origin main
+
+git checkout feature/my-work
+git rebase main
+```
+
+```
+main:               A → B → C → D (squash 커밋)
+                                  ↓
+feature/my-work:                  X' → Y' → Z' (재배치된 커밋)
+```
+
+- feature 브랜치 커밋들이 **최신 main 위에 선형으로 재배치**됩니다.
+- PR 커밋 목록에 작업 커밋만 노출됩니다.
+- Squash & Merge 철학(깔끔한 히스토리)과 일관성이 유지됩니다.
+
+### 충돌 발생 시 처리 절차
+
+rebase 도중 충돌이 발생하면 커밋 단위로 순차적으로 해결합니다.
+
+```bash
+git rebase main
+
+# 충돌 발생 시
+# 1. 충돌 파일을 수정
+# 2. git add <파일>
+# 3. git rebase --continue
+
+# rebase를 취소하고 싶을 때
+git rebase --abort
+```
+
+> **📌 참고** rebase는 커밋을 하나씩 재배치하기 때문에, 각 커밋이 어느 시점에서 충돌했는지 맥락이 명확합니다. merge는 충돌을 한 번에 해결하지만, 원인 파악이 어려울 수 있습니다.
+
+---
+
+## rebase 후 force push가 필요한 이유
+
+### 핵심 원인: rebase는 커밋을 "재생성"한다
+
+rebase는 기존 커밋을 수정하는 것이 아니라, **새로운 커밋으로 복사**합니다. 이 과정에서 커밋 해시(SHA)가 변경됩니다.
+
+```
+# rebase 전 (로컬 & 원격 동일)
+remote: X  → Y  → Z   (SHA: abc, def, ghi)
+local:  X  → Y  → Z   (SHA: abc, def, ghi)
+
+# rebase 후 (로컬만 변경)
+remote:     X  → Y  → Z           (SHA: abc, def, ghi) ← 그대로
+local:  D → X' → Y' → Z'          (SHA: 111, 222, 333) ← 새 커밋
+```
+
+Git 입장에서 원격의 `Z`(SHA: ghi)와 로컬의 `Z'`(SHA: 333)는 **완전히 다른 커밋**입니다. 원격에 로컬에 없는 커밋이 있다고 판단해 push를 거부합니다.
+
+```
+! [rejected] perf/235-home-lighthouse → perf/235-home-lighthouse (non-fast-forward)
+```
+
+이때 필요한 것이 **force push**입니다.
+
+---
+
+## --force vs --force-with-lease
+
+단순히 `--force`를 사용하면 원격 상태를 무시하고 덮어씁니다. 이는 **팀원이 같은 브랜치에 push한 작업을 유실시킬 위험**이 있습니다.
+
+```bash
+# ❌ 위험: 원격 상태를 무조건 덮어씀
+git push --force
+
+# ✅ 안전: 내가 마지막으로 fetch한 이후 원격에 새 커밋이 없을 때만 force push
+git push --force-with-lease
+```
+
+### --force-with-lease 동작 원리
+
+| 상황                              | 결과                      |
+| --------------------------------- | ------------------------- |
+| 원격에 내가 모르는 새 커밋이 없음 | push 성공                 |
+| 원격에 내가 모르는 새 커밋이 있음 | push 거부 (안전하게 차단) |
+
+`--force-with-lease`는 "내가 마지막으로 확인한 원격 상태와 현재 원격이 일치할 때만 덮어써라"라는 조건부 force push입니다.
+
+### upstream이 없을 때
+
+처음 브랜치를 push하거나 rebase로 tracking이 끊어진 경우, upstream을 함께 지정해야 합니다.
+
+```bash
+git push --force-with-lease --set-upstream origin feature/my-branch
+
+# 또는 줄임말
+git push -u origin feature/my-branch --force-with-lease
+```
+
+한 번 설정하면 이후부터는 짧게 사용할 수 있습니다.
+
+```bash
+git push --force-with-lease
+```
+
+---
+
+## rebase의 트레이드오프
+
+rebase가 항상 최선은 아닙니다. 상황에 따라 다음 트레이드오프를 고려해야 합니다.
+
+| 항목                  | merge             | rebase                               |
+| --------------------- | ----------------- | ------------------------------------ |
+| push 방식             | `git push` (일반) | `git push --force-with-lease` (항상) |
+| PR 커밋 목록          | merge commit 포함 | 내 커밋만                            |
+| 충돌 해결             | 한 번에           | 커밋 단위로 순차 처리                |
+| 혼자 쓰는 브랜치      | 문제 없음         | 문제 없음                            |
+| **공유 브랜치**       | 안전              | 위험 (force push 필요)               |
+| Squash & Merge와 궁합 | 보통              | 좋음                                 |
+
+> **⚠️ 주의** 여러 명이 동시에 작업하는 공유 브랜치(예: `develop`)에서는 rebase를 사용하지 마십시오. force push로 인해 팀원의 작업이 유실될 수 있습니다.
+
+### 권장 전략
+
+```
+혼자 작업하는 feature 브랜치  →  rebase + force-with-lease  ✅
+여러 명이 공유하는 브랜치      →  merge                      ✅
+```
+
+---
+
+## 전체 워크플로우 요약
+
+```bash
+# 1. main 최신화
+git checkout main
+git pull origin main
+
+# 2. feature 브랜치로 이동
+git checkout feature/my-branch
+
+# 3. main 위로 rebase
+git rebase main
+
+# 충돌 발생 시:
+#   파일 수정 → git add <파일> → git rebase --continue
+
+# 4. 원격에 force push
+git push --force-with-lease
+```
+
+---
+
+## 참고 자료
+
+- [GitHub Docs — About pull request merges](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/about-pull-request-merges)
+- [Git 공식 문서 — git rebase](https://git-scm.com/docs/git-rebase)
+- [Git 공식 문서 — git push --force-with-lease](https://git-scm.com/docs/git-push#Documentation/git-push.txt---force-with-leaseltrefnamegt)
+- [Atlassian Git Tutorial — Merging vs. Rebasing](https://www.atlassian.com/git/tutorials/merging-vs-rebasing)
