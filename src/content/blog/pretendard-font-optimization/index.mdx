@@ -1,0 +1,227 @@
+---
+title: "Pretendard 폰트 최적화: 2MB에서 20kB로 줄이기"
+description: "Next.js 15 App Router 프로젝트에서 Lighthouse Performance 점수를 개선하는 과정에서 진행한 Pretendard 폰트 로딩 방식 비교와 최적화 기록입니다."
+pubDate: 2026-05-26T00:00:00+09:00
+slug: "2026/05/26/pretendard-font-optimization"
+tags: ["Performance", "Font", "Next.js", "Web Vitals", "LCP"]
+draft: false
+---
+
+import { Image } from "astro:assets";
+import fontVariable from "./font-variable.png";
+import fontSubset from "./font-subset.png";
+import fontCdn from "./font-cdn.png";
+
+## 배경
+
+UNIBUSK 홈 페이지의 Lighthouse Performance 점수가 63~70점으로 측정되었습니다.
+
+Chrome DevTools Network 탭 분석 결과, `PretendardVariable.woff2` 파일이 2MB 크기로 26초에 걸쳐 로드되고 있었습니다. 대용량 폰트 파일이 네트워크 대역폭을 점유하여 다른 리소스 로딩을 지연시키고 있었으며, Lighthouse의 "Avoid enormous network payloads" 항목에서도 경고로 표시되었습니다.
+
+이를 개선하기 위해 3가지 방식을 실제로 적용하고 Chrome DevTools Network 탭으로 비교 측정했습니다.
+
+---
+
+## 3가지 방법 비교
+
+### 방법 1: Variable Font 자체 호스팅 (기존 방식)
+
+`next/font/local`을 사용해 `PretendardVariable.woff2` 단일 파일을 제공합니다.
+
+```tsx
+// app/layout.tsx
+const pretendard = localFont({
+  src: "../styles/fonts/PretendardVariable.woff2",
+  display: "swap",
+  weight: "100 900",
+  variable: "--font-pretendard",
+});
+```
+
+<br />
+
+<Image src={fontVariable} alt="Variable Font 네트워크 측정 결과" width={720} />
+
+| 항목      | 측정값       |
+| --------- | ------------ |
+| 파일 수   | 1개          |
+| 크기      | **2,058 kB** |
+| 로딩 시간 | **26.08s**   |
+| Priority  | High         |
+
+**성능 저하 원인**
+
+Variable Font는 `font-weight: 100`부터 `900`까지 모든 굵기를 하나의 파일에 포함합니다. 파일 하나로 전체 굵기를 표현할 수 있다는 장점이 있으나, 그만큼 파일 크기가 커집니다. 한글은 초성·중성·종성 조합으로 최대 11,172자의 음절을 표현할 수 있기 때문에, 전체 글자셋을 포함한 Variable Font는 2MB에 달합니다.
+
+---
+
+### 방법 2: Subset 4개 자체 호스팅
+
+굵기별로 분리된 정적 폰트 파일 4개를 `next/font/local`로 제공합니다.
+
+```tsx
+// app/layout.tsx
+const pretendard = localFont({
+  src: [
+    { path: "../styles/fonts/Pretendard-Regular.subset.woff2", weight: "400" },
+    { path: "../styles/fonts/Pretendard-Medium.subset.woff2", weight: "500" },
+    { path: "../styles/fonts/Pretendard-SemiBold.subset.woff2", weight: "600" },
+    { path: "../styles/fonts/Pretendard-Bold.subset.woff2", weight: "700" },
+  ],
+  display: "swap",
+  variable: "--font-pretendard",
+});
+```
+
+<Image src={fontSubset} alt="Subset 4개 네트워크 측정 결과" width={720} />
+
+| 항목      | 측정값                             |
+| --------- | ---------------------------------- |
+| 파일 수   | 4개                                |
+| 크기      | 각 267~271 kB (합산 **~1,076 kB**) |
+| 로딩 시간 | **~8.8s**                          |
+| Priority  | High                               |
+
+**성능 개선 원인**
+
+각 파일이 특정 굵기 하나만 포함하므로 단일 파일 크기가 작습니다. 다만 KS X 1001 기준의 전체 한글 자모 조합을 포함하고 있어, 파일 4개 합산 시 1MB를 초과합니다.
+
+**Variable Font와의 결정적 차이: weight 표현 범위**
+
+|                    | Variable Font      | Static Font (Subset)                |
+| ------------------ | ------------------ | ----------------------------------- |
+| weight 지원 범위   | 100~900 연속값     | 선언한 값만 (400, 500, 600, 700)    |
+| `font-weight: 350` | 지원               | 미지원 (가장 가까운 400으로 렌더링) |
+| 중간값 보간        | 브라우저 자동 처리 | 미지원                              |
+
+---
+
+### 방법 3: CDN Dynamic Subset (최종 선택)
+
+jsDelivr CDN에서 제공하는 `pretendard-dynamic-subset.min.css`를 사용합니다.
+
+```tsx
+// app/layout.tsx
+export default function RootLayout({ children }: { children: ReactNode }) {
+  return (
+    <html lang="ko">
+      <head>
+        <link rel="preconnect" href="https://cdn.jsdelivr.net" crossOrigin="" />
+        <link
+          rel="stylesheet"
+          as="style"
+          crossOrigin=""
+          href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard-dynamic-subset.min.css"
+        />
+      </head>
+      <body className="antialiased">{children}</body>
+    </html>
+  );
+}
+```
+
+<Image src={fontCdn} alt="CDN Dynamic Subset 네트워크 측정 결과" width={720} />
+
+| 항목        | 측정값       |
+| ----------- | ------------ |
+| 파일 수     | 20개+        |
+| 청크당 크기 | **10~20 kB** |
+| 로딩 시간   | **~2.5s**    |
+| Priority    | **Highest**  |
+
+---
+
+## Dynamic Subset 동작 방식
+
+앞선 두 방식과 CDN Dynamic Subset의 결정적 차이는 **로드하는 리소스 범위**에 있습니다.
+
+- **자체 호스팅**: 전체 한글 자모 포함 파일을 통째로 다운로드
+- **CDN Dynamic Subset**: 현재 페이지에서 실제로 렌더링되는 문자 범위만 분할 로드
+
+`pretendard-dynamic-subset.min.css` 내부 구조는 다음과 같습니다.
+
+```css
+@font-face {
+  font-family: "Pretendard";
+  src: url("Pretendard-Regular.subset.88.woff2") format("woff2");
+  unicode-range: U+C544-C54B, ...; /* '아'~'앋' 범위 */
+}
+@font-face {
+  font-family: "Pretendard";
+  src: url("Pretendard-Regular.subset.89.woff2") format("woff2");
+  unicode-range: U+C54C-C573, ...; /* 다음 범위 */
+}
+/* ... 수십 개로 분할 */
+```
+
+브라우저는 페이지에 실제로 등장하는 문자가 어느 `unicode-range`에 속하는지 판단한 후, 해당 청크 파일만 요청합니다. 페이지에 "버스킹" 3글자만 있으면, 그 유니코드 범위에 해당하는 파일 몇 개만 가져옵니다.
+
+파일 수는 늘어나지만, **실제 다운로드 크기가 극적으로 줄어듭니다.**
+
+> **📌 참고** HTTP/2 환경에서는 여러 파일을 하나의 연결로 병렬 요청하기 때문에, 파일 수가 많아도 성능에 불리하지 않습니다.
+
+---
+
+## 각 속성의 역할
+
+### `rel="preconnect"`
+
+```html
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin="" />
+```
+
+브라우저가 실제 폰트 파일을 요청하기 전에 CDN 서버와 미리 TCP/TLS 연결을 맺습니다. 외부 도메인 요청 시 발생하는 연결 오버헤드를 사전에 처리합니다.
+
+### `as="style"`
+
+```html
+<link rel="stylesheet" as="style" ... />
+```
+
+브라우저에게 이 리소스가 스타일시트임을 명시합니다. 브라우저가 리소스 우선순위를 정확히 파악하여 렌더링 차단 전에 처리할 수 있습니다. 외부 도메인 리소스일 때 특히 중요합니다.
+
+### `crossOrigin=""`
+
+외부 도메인(jsDelivr)에서 리소스를 가져올 때 CORS를 올바르게 처리하기 위해 필요합니다. `preconnect`와 `stylesheet` 링크 모두에 명시해야 연결 재사용이 가능합니다.
+
+> **⚠️ 주의** JSX에서는 HTML의 `crossorigin` 속성을 `crossOrigin`으로 카멜케이스로 작성해야 합니다.
+
+---
+
+## CDN 의존성 리스크와 fallback 전략
+
+CDN 방식의 단점은 **외부 서비스 의존성**입니다. jsDelivr가 중단되면 폰트가 적용되지 않습니다.
+
+이를 대비해 `globals.css`에 환경별 fallback 스택을 구성했습니다.
+
+```css
+/* styles/globals.css */
+:root {
+  --font-sans:
+    Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Nanum Gothic", sans-serif;
+}
+```
+
+| 폰트                        | 적용 환경                      |
+| --------------------------- | ------------------------------ |
+| `Pretendard`                | CDN 로드 성공 시               |
+| `-apple-system`             | macOS/iOS — SF Pro (영문/숫자) |
+| `BlinkMacSystemFont`        | Chrome on macOS — SF Pro       |
+| `Apple SD Gothic Neo`       | macOS/iOS — 한글               |
+| `Malgun Gothic` (맑은 고딕) | Windows 기본 한글 폰트         |
+| `Nanum Gothic`              | Android 및 구형 기기 한글      |
+| `sans-serif`                | 브라우저 기본값 (최후 수단)    |
+
+CDN 로드 실패 시에도 각 OS의 기본 한글 폰트로 graceful degradation이 이루어집니다.
+
+---
+
+## 최종 결과 비교
+
+| 방법                        | 파일 수   | 총 크기            | 로딩 시간 | Priority    |
+| --------------------------- | --------- | ------------------ | --------- | ----------- |
+| Variable Font (자체 호스팅) | 1개       | 2,058 kB           | 26.08s    | High        |
+| Subset 4개 (자체 호스팅)    | 4개       | ~1,076 kB          | ~8.8s     | High        |
+| **CDN Dynamic Subset**      | **20개+** | **~10~20 kB/청크** | **~2.5s** | **Highest** |
+
+CDN Dynamic Subset 적용 후 폰트 로딩 시간이 **26초 → 2.5초**로 단축되었습니다.
