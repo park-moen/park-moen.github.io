@@ -1,0 +1,157 @@
+---
+title: "Lighthouse CI warm-up 트러블슈팅"
+description: "Cloudflare Workers 배포 환경에서 Lighthouse CI 첫 측정 시 '/' 라우트 성능 점수가 낮게 나오는 현상의 원인과 해결 과정을 기록합니다."
+pubDate: 2026-05-27T00:00:00+09:00
+slug: "2026/05/27/lighthouse-ci-warmup"
+tags: ["CI", "Lighthouse", "Cloudflare", "Performance", "GitHub Actions"]
+draft: false
+---
+
+import { Image } from "astro:assets";
+import beforeImg from "./before.png";
+import afterImg from "./after.png";
+
+## 환경
+
+| 항목            | 내용                                                                                             |
+| --------------- | ------------------------------------------------------------------------------------------------ |
+| 프레임워크      | Next.js 15 (App Router)                                                                          |
+| 배포 환경       | Cloudflare Workers (OpenNext)                                                                    |
+| CI 파이프라인   | GitHub Actions                                                                                   |
+| Lighthouse 설정 | `numberOfRuns: 1` (CI 시간 단축 목적으로 고정)                                                   |
+| 측정 대상       | `/`, `/busking-map`, `/performance-list?tab=upcoming`, `/performance-list?tab=past`, `/about-us` |
+
+---
+
+## 문제 현상
+
+PR CI 파이프라인에서 Lighthouse 측정 시 `/` 라우트만 일관되게 40 ~ 50점대가 측정되었습니다. 다른 라우트는 70 ~ 74점대로 정상 측정되었습니다.
+
+<Image src={beforeImg} alt="warm-up 적용 전 Lighthouse CI 측정 결과 — '/' 라우트 46점" width={720} />
+
+`numberOfRuns: 3`으로 설정하면 2~3회차는 70점대가 나오는 것으로 보아, 1회차 측정 환경의 일관성 문제임을 확인했습니다.
+
+---
+
+## 원인 분석
+
+### 1차 가설: Cloudflare Workers Cold Start
+
+처음에는 `health check`에서 HTTP 200을 확인한 직후 Lighthouse가 실행되면, Worker가 완전히 준비되지 않은 상태에서 측정이 이루어지는 **Cold Start** 문제로 추정했습니다.
+
+**시도한 해결책:** `curl` 기반 warm-up 단계 추가
+
+```bash
+for url in "${URLS[@]}"; do
+  for i in {1..5}; do
+    curl -s -o /dev/null "$url" || true
+  done
+done
+```
+
+**결과:** 효과 없음. `/` 점수 여전히 40~50점대 유지.
+
+---
+
+### 2차 분석: curl warm-up의 근본적 한계
+
+`curl`은 HTML 문서만 fetch합니다. Lighthouse가 실제로 측정하는 방식과 다릅니다.
+
+|           | curl | Lighthouse (headless Chrome) |
+| --------- | ---- | ---------------------------- |
+| HTML 문서 | ✅   | ✅                           |
+| JS 번들   | ❌   | ✅                           |
+| CSS       | ❌   | ✅                           |
+| 이미지    | ❌   | ✅                           |
+| 폰트      | ❌   | ✅                           |
+
+**실제 원인은 Cloudflare CDN 정적 자산 캐시가 채워지지 않은 상태에서 측정이 시작되기 때문이었습니다.**
+
+Lighthouse 첫 측정 시 JS, CSS, 이미지, 폰트 등 모든 정적 자산이 CDN에 캐시되지 않은 상태이므로 전부 Origin에서 새로 받아야 합니다. 이 과정에서 응답 지연이 발생하여 성능 점수가 낮게 측정됩니다.
+
+`numberOfRuns: 3`에서 2~3회차 점수가 좋아지는 이유도 동일합니다. **1회차 Lighthouse 실행 자체가 CDN 캐시를 채워주기 때문에**, 이후 측정은 캐시 히트 상태에서 진행됩니다.
+
+```
+1회차 Lighthouse 실행
+  → 정적 자산 전부 Origin에서 로드 (느림)
+  → 동시에 CDN 캐시에 자산 저장
+        ↓
+2~3회차 Lighthouse 실행
+  → 정적 자산 CDN 캐시에서 로드 (빠름)
+  → 점수 70점대
+```
+
+---
+
+## 해결 방법
+
+`curl` 기반 warm-up을 **headless Chrome** 기반으로 교체하여, 실제 브라우저와 동일하게 모든 정적 자산을 로드하고 CDN 캐시를 채웁니다.
+
+```yaml
+- name: Warm up Cloudflare Workers
+  run: |
+    URLS=(
+      "$LHCI_BASE_URL"
+      "$LHCI_BASE_URL/busking-map"
+      "$LHCI_BASE_URL/performance-list?tab=upcoming"
+      "$LHCI_BASE_URL/performance-list?tab=past"
+      "$LHCI_BASE_URL/about-us"
+    )
+    for url in "${URLS[@]}"; do
+      echo "Warming up: $url"
+      google-chrome \
+        --headless \
+        --disable-gpu \
+        --no-sandbox \
+        --disable-dev-shm-usage \
+        --dump-dom "$url" > /dev/null 2>&1 && echo "✓ Success" || echo "✗ Failed"
+    done
+    sleep 5
+```
+
+### Chrome 플래그 설명
+
+| 플래그                    | 역할                                                  |
+| ------------------------- | ----------------------------------------------------- |
+| `--headless`              | GUI 없이 실행                                         |
+| `--disable-gpu`           | CI 환경에서 GPU 비활성화                              |
+| `--no-sandbox`            | Linux CI 환경에서 필수                                |
+| `--disable-dev-shm-usage` | `/dev/shm` 용량 부족으로 인한 Chrome 크래시 방지      |
+| `--dump-dom`              | 페이지를 완전히 로드한 후 DOM 출력 (로드 트리거 용도) |
+
+> **📌 참고** `--disable-dev-shm-usage`는 GitHub Actions 환경에서 반드시 필요합니다. GitHub Actions runner의 `/dev/shm` 기본 할당량은 64MB로 작아, 이 플래그 없이 headless Chrome을 실행하면 크래시가 발생할 수 있습니다. 이 플래그를 추가하면 Chrome이 `/dev/shm` 대신 `/tmp`를 사용합니다.
+
+---
+
+## 최종 CI 워크플로우
+
+```
+1. Wait for preview to be ready
+   └─ HTTP 200 폴링 (최대 30회 × 5초 간격)
+   └─ Cloudflare 엣지 네트워크 전파 완료 대기
+
+2. Warm up Cloudflare Workers
+   └─ headless Chrome으로 5개 URL 순차 로드
+   └─ JS·CSS·이미지·폰트 포함 전체 자산 로드 → CDN 캐시 워밍
+   └─ sleep 5 → CDN 캐시 전파 안정화 대기
+
+3. Run Lighthouse CI
+   └─ CDN 캐시가 채워진 상태에서 측정
+   └─ numberOfRuns: 1로 고정
+
+4. Comment Lighthouse Results
+   └─ PR 코멘트로 결과 업데이트
+```
+
+> **📌 참고** `needs: preview`로 lighthouse job은 preview 배포 완료 후 실행됩니다. 그러나 Cloudflare 배포 API 성공 응답 시점과 실제 URL 접근 가능 시점 사이에 전파 지연이 존재할 수 있으므로, `Wait for preview to be ready` 단계는 여전히 필요합니다.
+
+<Image src={afterImg} alt="warm-up 적용 후 Lighthouse CI 측정 결과 — '/' 라우트 72점" width={720} />
+
+---
+
+## 참고 자료
+
+- [GitHub Actions 공식 문서 — Standard GitHub-hosted runners](https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners/about-github-hosted-runners#standard-github-hosted-runners-for-public-repositories)
+- [Chrome for Developers — The new Headless mode](https://developer.chrome.com/docs/chromium/new-headless)
+- [Lighthouse CI GitHub — Configuration](https://github.com/GoogleChrome/lighthouse-ci/blob/main/docs/configuration.md)
+- [Cloudflare 공식 문서 — Default Cache Behavior](https://developers.cloudflare.com/cache/concepts/default-cache-behavior/)
