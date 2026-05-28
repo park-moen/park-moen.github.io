@@ -1,0 +1,365 @@
+---
+title: "AWS Amplify → CloudFront + S3 마이그레이션 가이드"
+description: "모노레포(Yarn 4 + Turbo) 환경에서 AWS Amplify의 비용·제어권 한계를 분석하고, CloudFront + S3 + GitHub Actions 기반 선택적 배포 파이프라인으로 전환한 과정을 단계별로 기록합니다."
+pubDate: 2026-04-05T00:00:00+09:00
+slug: "2026/04/05/monorepo-cloudfront-deploy"
+tags: ["AWS", "CloudFront", "S3", "GitHub Actions", "Monorepo", "CI/CD", "Turborepo"]
+draft: false
+---
+
+> 모노레포(Yarn 4 + Turbo) 환경에서 변경된 앱만 선택적으로 배포하는 CloudFront + S3 + GitHub Actions 파이프라인 구성 가이드입니다.
+
+---
+
+## 1. 현재 구조와 문제점
+
+### 모노레포 구성
+
+```
+dessert-front-seller/
+├── apps/
+│   ├── seller/     ✅ 완전 구현 (현재 Amplify 배포 대상)
+│   └── admin/      ⚠️ 구조만 존재 (향후 배포 예정)
+├── packages/
+│   ├── ui/         공유 UI 컴포넌트
+│   ├── icons/      공유 아이콘
+│   └── config/     공유 설정
+└── turbo.json
+```
+
+### 현재 Amplify 배포의 문제점
+
+| 문제      | 설명                                                   |
+| --------- | ------------------------------------------------------ |
+| 전체 빌드 | 매 push마다 모노레포 전체를 빌드 — 변경 없는 앱도 포함 |
+| 비용 증가 | admin 앱 추가 시 별도 Amplify 앱 생성 필요 → 비용 2배  |
+| 제어 제한 | 캐시 전략, WAF 연동, Lambda@Edge 등 세밀한 제어 불가   |
+
+---
+
+## 2. CloudFront + S3 선택 이유
+
+### 비용 비교 (예상: 월 50GB 트래픽, 100회 배포)
+
+| 항목            | AWS Amplify                  | CloudFront + S3                   |
+| --------------- | ---------------------------- | --------------------------------- |
+| 빌드            | 100회 × 5분 × $0.01 = **$5** | GitHub Actions Free tier = **$0** |
+| 호스팅/스토리지 | 50GB × $0.15 = **$7.5**      | S3 약 10MB × $0.023 ≈ **$0.0002** |
+| CDN 전송        | 포함                         | 50GB × $0.0085 = **$0.43**        |
+| **합계**        | **~$12.5/월**                | **~$0.5/월**                      |
+
+### 제어권 확보
+
+- `Cache-Control` 헤더로 **캐시 전략 직접 제어**
+- **CloudFront 함수/Lambda@Edge** 고급 라우팅 지원
+- **WAF 연동**으로 보안 강화 가능
+- 여러 앱을 **단일 CloudFront**로 관리 가능
+
+---
+
+## 3. 목표 아키텍처
+
+```
+GitHub Actions
+    ├── 변경 감지 (dorny/paths-filter)
+    ├── seller 변경 → build:seller → S3 업로드 → CloudFront 무효화
+    └── admin 변경  → build:admin  → S3 업로드 → CloudFront 무효화
+
+S3 버킷 (앱별 분리 — 권장)
+    s3://dessert-seller-prod/  →  seller.dessert.com
+    s3://dessert-admin-prod/   →  admin.dessert.com
+
+CloudFront Distribution (앱당 1개)
+    seller-distribution → s3://dessert-seller-prod
+    admin-distribution  → s3://dessert-admin-prod
+```
+
+> **📌 단일 버킷 vs 앱별 버킷:** 앱별 버킷(옵션 B)을 권장합니다. 앱 간 격리, IAM 권한 분리, CloudFront 오류 페이지 독립 설정이 가능합니다.
+
+---
+
+## 4. AWS 인프라 설정
+
+### 4-1. S3 버킷 생성
+
+```bash
+aws s3api create-bucket \
+  --bucket dessert-seller-prod \
+  --region ap-northeast-2 \
+  --create-bucket-configuration LocationConstraint=ap-northeast-2
+```
+
+> **⚠️ 주의:** 퍼블릭 액세스 차단을 유지합니다. CloudFront OAC를 통해서만 접근하도록 버킷은 비공개로 설정합니다.
+
+### 4-2. S3 버킷 정책 (OAC 허용)
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowCloudFrontServicePrincipal",
+      "Effect": "Allow",
+      "Principal": { "Service": "cloudfront.amazonaws.com" },
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::dessert-seller-prod/*",
+      "Condition": {
+        "StringEquals": {
+          "AWS:SourceArn": "arn:aws:cloudfront::YOUR_ACCOUNT_ID:distribution/YOUR_DISTRIBUTION_ID"
+        }
+      }
+    }
+  ]
+}
+```
+
+### 4-3. CloudFront Distribution 핵심 설정
+
+| 설정 항목              | 값                                                    |
+| ---------------------- | ----------------------------------------------------- |
+| Origin Domain          | `dessert-seller-prod.s3.ap-northeast-2.amazonaws.com` |
+| Origin Access          | OAC 생성 후 연결                                      |
+| Viewer Protocol Policy | Redirect HTTP to HTTPS                                |
+| Cache Policy           | CachingOptimized (AWS 관리형)                         |
+| Default Root Object    | `index.html`                                          |
+| Custom Domain (CNAME)  | `seller.dessert.com` (선택사항)                       |
+| SSL Certificate        | ACM 인증서 (`us-east-1` 리전 필수)                    |
+
+> **⚠️ 주의:** ACM 인증서는 반드시 `us-east-1(버지니아 북부)` 리전에서 발급해야 CloudFront에 연결 가능합니다.
+
+**SPA 라우팅을 위한 Error Pages 설정 (필수):**
+
+| HTTP Error Code | Response Page Path | HTTP Response Code |
+| --------------- | ------------------ | ------------------ |
+| 403             | `/index.html`      | 200                |
+| 404             | `/index.html`      | 200                |
+
+React Router는 클라이언트 사이드 라우팅이므로 S3에 없는 경로 접근 시 403/404가 반환됩니다. `index.html`로 돌려보내야 앱이 라우팅을 처리할 수 있습니다.
+
+### 4-4. IAM 정책 (GitHub Actions용)
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "S3SellerDeploy",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:GetObject"],
+      "Resource": ["arn:aws:s3:::dessert-seller-prod", "arn:aws:s3:::dessert-seller-prod/*"]
+    },
+    {
+      "Sid": "CloudFrontInvalidation",
+      "Effect": "Allow",
+      "Action": ["cloudfront:CreateInvalidation"],
+      "Resource": "arn:aws:cloudfront::YOUR_ACCOUNT_ID:distribution/YOUR_DISTRIBUTION_ID"
+    }
+  ]
+}
+```
+
+> **📌 최소 권한 원칙:** admin 배포용 IAM은 admin 버킷에만 권한을 부여합니다. 하나의 키가 모든 버킷에 접근하지 않도록 앱별로 분리합니다.
+
+---
+
+## 5. 선택적 배포 전략
+
+`dorny/paths-filter`로 변경된 앱을 감지하고, `turbo --filter`로 해당 앱만 빌드합니다.
+
+```yaml
+- uses: dorny/paths-filter@v3
+  id: filter
+  with:
+    filters: |
+      seller:
+        - 'apps/seller/**'
+        - 'packages/**'    # 공유 패키지 변경 시 재빌드 필요
+        - 'turbo.json'
+      admin:
+        - 'apps/admin/**'
+        - 'packages/**'
+        - 'turbo.json'
+```
+
+```bash
+yarn turbo build --filter=@dessert/seller   # seller + 의존 패키지만 빌드
+yarn turbo build --filter=@dessert/admin    # admin + 의존 패키지만 빌드
+```
+
+---
+
+## 6. GitHub Actions 파이프라인
+
+`.github/workflows/deploy.yml`:
+
+```yaml
+name: Deploy
+
+on:
+  push:
+    branches: [develop]
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-22.04
+    outputs:
+      seller: ${{ steps.filter.outputs.seller }}
+      admin: ${{ steps.filter.outputs.admin }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            seller:
+              - 'apps/seller/**'
+              - 'packages/**'
+              - 'turbo.json'
+            admin:
+              - 'apps/admin/**'
+              - 'packages/**'
+              - 'turbo.json'
+
+  deploy-seller:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.seller == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Enable Corepack (Yarn 4)
+        run: corepack enable
+      - name: 의존성 캐시
+        uses: actions/cache@v4
+        with:
+          path: .yarn/cache
+          key: ${{ runner.os }}-yarn-${{ hashFiles('yarn.lock') }}
+          restore-keys: ${{ runner.os }}-yarn-
+      - name: 의존성 설치
+        run: yarn install --immutable
+      - name: Seller 앱 빌드
+        run: yarn turbo build --filter=@dessert/seller
+        env:
+          VITE_API_BASE_URL: ${{ secrets.SELLER_API_BASE_URL }}
+      - name: AWS 자격증명 설정
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+      - name: S3 업로드
+        run: |
+          aws s3 sync apps/seller/dist s3://dessert-seller-prod \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable"
+          aws s3 cp apps/seller/dist/index.html s3://dessert-seller-prod/index.html \
+            --cache-control "no-cache, no-store, must-revalidate"
+      - name: CloudFront 캐시 무효화
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.SELLER_CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*"
+
+  deploy-admin:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.admin == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: corepack enable
+      - run: yarn install --immutable
+      - name: Admin 앱 빌드
+        run: yarn turbo build --filter=@dessert/admin
+        env:
+          VITE_API_BASE_URL: ${{ secrets.ADMIN_API_BASE_URL }}
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+      - name: S3 업로드
+        run: |
+          aws s3 sync apps/admin/dist s3://dessert-admin-prod \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable"
+          aws s3 cp apps/admin/dist/index.html s3://dessert-admin-prod/index.html \
+            --cache-control "no-cache, no-store, must-revalidate"
+      - run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.ADMIN_CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*"
+```
+
+### GitHub Secrets 설정
+
+GitHub Repository → **Settings → Secrets and variables → Actions** 에 등록:
+
+| Secret 이름                         | 설명                        |
+| ----------------------------------- | --------------------------- |
+| `AWS_ACCESS_KEY_ID`                 | IAM 사용자 액세스 키 ID     |
+| `AWS_SECRET_ACCESS_KEY`             | IAM 사용자 시크릿 액세스 키 |
+| `SELLER_CLOUDFRONT_DISTRIBUTION_ID` | Seller CloudFront 배포 ID   |
+| `SELLER_API_BASE_URL`               | Seller 앱 API 엔드포인트    |
+| `ADMIN_CLOUDFRONT_DISTRIBUTION_ID`  | Admin CloudFront 배포 ID    |
+| `ADMIN_API_BASE_URL`                | Admin 앱 API 엔드포인트     |
+
+---
+
+## 7. 환경 변수 관리
+
+Vite는 `VITE_` 접두사가 붙은 변수만 클라이언트 번들에 포함합니다. 빌드 시 `import.meta.env.VITE_*`를 실제 값으로 인라인 치환합니다.
+
+```bash
+# apps/seller/.env.example  (커밋 가능)
+VITE_API_BASE_URL=https://api.dessert.com
+
+# apps/seller/.env.local  (반드시 .gitignore에 포함)
+VITE_API_BASE_URL=https://api.dessert.com
+```
+
+---
+
+## 8. 마이그레이션 체크리스트
+
+### Phase 1 — AWS 인프라
+
+- [ ] S3 버킷 생성 (`dessert-seller-prod`) — 퍼블릭 액세스 차단, 정적 웹사이트 호스팅 **비활성화**
+- [ ] CloudFront Distribution 생성 — OAC 연결, S3 버킷 정책 추가, Default Root Object: `index.html`, Error Pages: 403·404 → `/index.html` (HTTP 200)
+- [ ] IAM 사용자 생성 — S3 + CloudFront 최소 권한 정책, 액세스 키 발급
+- [ ] (선택) ACM 인증서 발급 (`us-east-1`) + 커스텀 도메인 연결
+
+### Phase 2 — GitHub 설정
+
+- [ ] GitHub Secrets 등록
+- [ ] `.github/workflows/deploy.yml` 작성 및 커밋
+- [ ] 기존 `ci.yml`에서 Amplify 관련 내용 제거
+
+### Phase 3 — 테스트 배포
+
+- [ ] 로컬 빌드 확인: `yarn turbo build --filter=@dessert/seller`
+- [ ] 수동 S3 업로드 → CloudFront URL 접근 확인
+- [ ] 하위 경로 직접 접근 확인 (SPA 라우팅)
+- [ ] `develop` 브랜치 push → `deploy.yml` 자동 실행 확인
+- [ ] seller 파일만 수정 후 push → seller만 배포되는지 확인
+
+### Phase 4 — Amplify 정리 (안정화 후)
+
+- [ ] 최소 1주 병행 운영 후 안정성 확인
+- [ ] `.github/amplify.yml` 파일 삭제
+- [ ] AWS Amplify Console에서 앱 삭제
+
+---
+
+## 참고 자료
+
+- [AWS S3 정적 웹사이트 호스팅](https://docs.aws.amazon.com/AmazonS3/latest/userguide/WebsiteHosting.html)
+- [CloudFront OAC 설정](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html)
+- [Turbo --filter 문서](https://turbo.build/repo/docs/reference/run#--filter-string)
+- [dorny/paths-filter GitHub Action](https://github.com/dorny/paths-filter)
+- [Vite 환경 변수](https://ko.vitejs.dev/guide/env-and-mode.html)
+- [aws-actions/configure-aws-credentials](https://github.com/aws-actions/configure-aws-credentials)
